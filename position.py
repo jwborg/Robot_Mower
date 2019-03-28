@@ -18,7 +18,7 @@ kill_thread_0 = False       # set by toggle_position_thread()
 
 # camera rotation
 cam_rot_clockwise = True        # the rotating direction of the camera
-cam_bearing = 0                 # the bearing in degrees of the camera
+cam_bearing = 0.0               # the bearing in degrees of the camera
 
 # beacon detection return codes
 no_beacon    = 0
@@ -26,7 +26,7 @@ beacon_green = 1
 beacon_red   = 2
 
 # beacon data
-abs_bear_veh = 0                                # current bearing of vehicle
+abs_bear_veh = 0.0                              # current bearing of vehicle
 beacon = 1                                      # the current beacon (1-based)
 last_abs_bear_beacon = [ -1.0, -1.0, -1.0]      # last absolute bearing of the beacon
 #last_abs_bear_beacon = [ 350.0, 60.0, 120.0]    # last absolute bearing of the beacon
@@ -35,8 +35,8 @@ beacon_fresh = [ '+inf' , '+inf', '+inf' ]      # seconds since last update
 fresh_thres = 60.0                              # threshold in seconds to determine beacon freshness
 
 # bearing equation y = m.x + b
-m = [0, 0, 0]
-b = [0, 0, 0]
+m = [0.0, 0.0, 0.0]
+b = [0.0, 0.0, 0.0]
 
 # xy position of the 2 intersections
 x01 = 0.0
@@ -48,12 +48,11 @@ y02 = 0.0
 
 # beacon position, (x,y) in cm within work area
 beacons_defined = False
-#beacon_pos = np.array([(0,1500),(1500,1500),(1500,0)])
-beacon_pos = np.array([(0,0),(0,0),(0,0)])      # (x,y) coordinates of beacons 1, 2 and 3 in cm
+beacon_pos = np.array([(0.0,0.0),(0.0,0.0),(0.0,0.0)])      # (x,y) coordinates of beacons 1, 2 and 3 in cm
 
 # vehicle position
-cur_bear_veh = 0                # vehicle bearing in degrees from North on work area
-veh_pos_cm = [0,0]              # (x,y) position in cm within square of work area
+cur_bear_veh = 0.0                  # vehicle bearing in degrees from North on work area
+veh_pos_cm = [0.0,0.0]              # (x,y) position in cm within square of work area
 
 
     
@@ -134,7 +133,7 @@ def rotate_cam(no_steps):
 
 # automatically rotate the camera over 360 degrees by approximately 'incr_angle' and back again. Return the 
 # camera bearing relative to the vehicle after each step
-def rotate_cam_360(incr_angle):
+def rotate_cam_360(incr_angle, reverse_cmd):
 
     global cam_bearing
     global cam_rot_clockwise
@@ -146,12 +145,15 @@ def rotate_cam_360(incr_angle):
     steps_rev = 36                  # steps per revolution
     one_step = 360 / steps_rev      # degrees per step
     
+    # if a reverse command is given, reverse the direction. This is used during discovery of the beacons.
+    if reverse_cmd:
+        cam_rot_clockwise = not cam_rot_clockwise
     
     # the effective angle to rotate is determined by the stepping motor, so adjust the requested angle to the closest number of steps, with a minimum of 1 step. So the effective angle may differ from the requested angle.
-    no_steps = min(round(incr_angle / one_step,0), 1)
+    no_steps = max(round(incr_angle / one_step,0), 1)
     print ('rotate_cam_360: no_steps = ', no_steps)
     
-    # rotate the camera by  approximately the calculated number of steps
+    # rotate the camera by approximately the calculated number of steps
     if cam_rot_clockwise:
         rotate_cam(no_steps)
         cam_bearing = cam_bearing + no_steps * one_step
@@ -165,7 +167,10 @@ def rotate_cam_360(incr_angle):
     elif (cam_bearing < min_bearing):
         cam_rot_clockwise = True
     
-    return ()
+    # once a reverse command was given, it is always cleared
+    reverse_cmd = False       
+    
+    return (reverse_cmd)
 
     
     
@@ -186,14 +191,14 @@ def identify_beacon_found(obj_cam_angle):
     # determine which beacon is within range 
     for bcn in range(0,3):   
         
-        # for the first time 
-        if last_abs_bear_beacon[bcn] > 999.0:
+        # for the first time (should never be used now)
+        if last_abs_bear_beacon[bcn] < 0.0:
             last_abs_bear_beacon[bcn] = abs_bear_beacon_cur 
             beacon_last_update[bcn] = time.time()           # record the time
             
             # report which beacon was matched
-            matched_beacon = bcn + 1
-            print ("first", abs_bear_beacon_cur, last_abs_bear_beacon[bcn])
+            matched_beacon = bcn
+            print ("identify_beacon_found: first", abs_bear_beacon_cur, last_abs_bear_beacon[bcn])
             break
             
         # once there is previous data, the bearing should match closely to force a update 
@@ -202,8 +207,8 @@ def identify_beacon_found(obj_cam_angle):
             beacon_last_update[bcn] = time.time()           # record the time
             
             # report which beacon was matched
-            matched_beacon = bcn + 1
-            print ("following", abs_bear_beacon_cur, last_abs_bear_beacon[bcn])
+            matched_beacon = bcn
+            print ("identify_beacon_found: following", abs_bear_beacon_cur, last_abs_bear_beacon[bcn])
             break
     
     return(matched_beacon)
@@ -372,19 +377,28 @@ def get_quality(freshness, bear_delta):
     quality = qual_freshness + qual_delta
     
     return(quality)
-  
+ 
+
+
+ 
  
 
 # discover the position of the beacons sequence
 def discover_next_beacon(res_q):
 
     global cam_bearing
+    global beacons_defined
+    global last_abs_bear_beacon
     
     # to set the sensitivity   
     sensitivity = 250       # the area of the beacon image
     active_angle = 10       # the angle in the frame where objects will be reported
     rot_deg = 10            # degrees to rotate the camera by 
     
+    
+    # when starting the discovery, continue the camara rotation as is
+    reverse_cmd = False
+    cam_direction_reversed = False
     
     # do all beacons, but break after each beacon to test if the thread needs to be stopped
     for bcn in range(0,3):
@@ -394,11 +408,10 @@ def discover_next_beacon(res_q):
     
             print ('discover_next_beacon: bcn = ', bcn)
             
-            # 
+           
             # message the log discovery is started
-            type = que.t_message
             data = "Beacon discovery started for beacon " + str(bcn)
-            que.push_queue(res_q, type, data)
+            que.push_queue(res_q, que.t_message, data)
 
             # from position 1, rotate slowly until beacon is found
             abs_bear_beacon_cur_1 = last_abs_bear_beacon[bcn]
@@ -408,6 +421,8 @@ def discover_next_beacon(res_q):
                 (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle)
                 print ('main: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
 
+                print ('discover_next_beacon: cam_bearing = ', cam_bearing)
+                
                 # when a beacon is in the valid zone
                 if (status == beacon_green):
                 
@@ -420,7 +435,7 @@ def discover_next_beacon(res_q):
                     break
                     
                 # rotate the camera by 'n' degrees
-                rotate_cam_360(rot_deg)
+                reverse_cmd = rotate_cam_360(rot_deg, reverse_cmd)
 
                 # if no beacon can be discovered, this is a endless loop. Break
                 # out of the loop when the thread needs to be stopped
@@ -428,14 +443,19 @@ def discover_next_beacon(res_q):
                     return()
                 
                 # slow the loop down
-                time.sleep(1)
+                time.sleep(5)
         
             # first bearing obtained; drive vehicle forward to position 2
-            continue
             
-            # from the quadrant determine if we have to scan clock wise or counter clock wise
-            if cam_bearing > 180:
-                rot_deg = rot_deg * -1
+            print ('discover_next_beacon: driving to position 2')
+            time.sleep(5)
+                
+            
+            # depending on the camera rotation and bearing, we may need to revese
+            if (cam_bearing > 180 and cam_rot_clockwise) or (cam_bearing < 180 and not cam_rot_clockwise):
+                reverse_cmd = True
+                cam_direction_reversed = True
+            
                 
             # from position 2, step slowly until beacon is found again
             abs_bear_beacon_cur_2 = last_abs_bear_beacon[bcn]
@@ -445,6 +465,8 @@ def discover_next_beacon(res_q):
                 (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle)
                 print ('discover_next_beacon: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
 
+                print ('discover_next_beacon: cam_bearing = ', cam_bearing)
+                
                 # when a beacon is in the valid zone
                 if (status == beacon_green):
                 
@@ -457,7 +479,7 @@ def discover_next_beacon(res_q):
                     break
                     
                 # rotate the camera by 'n' degrees
-                rotate_cam_360(rot_deg)
+                reverse_cmd = rotate_cam_360(rot_deg, reverse_cmd)
                 
                 # if no beacon can be discovered, this is a endless loop. Break
                 # out of the loop when the thread needs to be stopped
@@ -465,24 +487,71 @@ def discover_next_beacon(res_q):
                     return()
         
                 # slow the loop down
-                time.sleep(1)
+                time.sleep(5)
         
             # second bearing obtained; drive vehicle back to position 1
-            continue
+            print ('discover_next_beacon: 2nd bearing obtained')
+            
+            # and set the camera_rotation to the orginal direction again
+            if cam_direction_reversed:
+                reverse_cmd = True
+                # rotate the camera by 'n' degrees
+                reverse_cmd = rotate_cam_360(rot_deg, reverse_cmd)
 
             # calculate the distance between position 1 and 2
-            distance = sqrt((x2-x1)**2 + (y2-y1)**2)
-
-            # calculate the beacon position relative to position 1
-            (x,y) = rel_pos(distance, abs_bear_beacon_cur_1, abs_bear_beacon_cur_2)
-            beacon_pos[bcn] = (x,y)
+            #distance = sqrt((x2-x1)**2 + (y2-y1)**2)
+            distance = 500.0            # in cm
             
-            # update the beacon position on the HMI
-            type = que.t_beacon_position
-            data = beacon_pos
-            que.push_queue(res_q, type, data)
-                            
+            # calculate the beacon position relative to position 1
+            (x_rel_cm,y_rel_cm, good_result) = rel_pos(distance, abs_bear_beacon_cur_1, abs_bear_beacon_cur_2)
+            if good_result:
+            
+                # x_rel_cm and y_rel_cm are relative positions towards the vehicle location 1
+                (x_veh_cm, y_veh_cm) = veh_pos_cm
+                x = x_veh_cm + x_rel_cm
+                y = y_veh_cm + y_rel_cm
+                
+                beacon_pos[bcn] = (x,y)
 
+                print ('discover_next_beacon: driving back to position 1')
+                time.sleep(5)
+                
+                print ('discover_next_beacon: beacon_pos = ', beacon_pos)
+
+                # update the beacon position on the HMI
+                data = beacon_pos
+                que.push_queue(res_q, que.t_beacon_position, data)       
+            
+                # store the bearing from position 1 as the last bearing
+                last_abs_bear_beacon[bcn] = abs_bear_beacon_cur_1
+                
+                # clear the data of the previous beacon for the next discovery
+                abs_bear_beacon_cur_1 = -1.0
+                abs_bear_beacon_cur_2 = -1.0
+                
+                
+            
+            # the beacon is at bearing 0 or 180, and this method does not work
+            else:
+            
+                print ('discover_next_beacon: beacon ', bcn, ' at bearing 0 or 180 - cannot calculate. Relocate vehicle and try again')
+            
+            
+            # if all 3 beacons are defined, stop the discovery 
+            beacons_defined = True
+            for bcn in range(0,3):
+                (x,y) = beacon_pos[bcn]
+                beacons_defined = beacons_defined and (x != 0.0 or y != 0.0)
+                
+            # message the log discovery is started
+            if beacons_defined:
+                data = "Beacon discovery completed, starting orientation sequence" 
+                que.push_queue(res_q, que.t_message, data)
+                
+                
+                
+                
+                
 # calculate the position of the beacon relative to position 1 
 def rel_pos(d1, A, B):
 
@@ -496,15 +565,36 @@ def rel_pos(d1, A, B):
     #    d1 |A/
     #       |/
     # pos 1 o  
+    #
+    #       x = d1 * tan(A) /  1 - (tan(A) / tan(B))
+    #
     
+    
+        # if the first bearing is 0 or 180 degrees, B will be the same
+        if math.isclose(A, 180.0, rel_tol=1e-2) or math.isclose(A, 0.0, rel_tol=1e-2):
+                    
+            # no answer due to division by zero
+            x = 0.0
+            y = 0.0
+            
+            # indicate cannot calculate
+            good_result = False
+        else:
            
-        x = d1 / (( 1 / tan(radians(A)))  - (1 / tan(radians(B))))
+            x = d1 / ( (1/ math.tan(math.radians(A))) -  (1 / math.tan(math.radians(B))) )
 
-        d2 = x / tan(radians(B))
+            d2 = x / math.tan(math.radians(B))
 
-        y = d1 + d2
+            y = d1 + d2
         
-        return (x,y)
+            # return rounded numbers
+            x = round(x, 4)
+            y = round(y, 4)
+            
+            # indicate good calculation
+            good_result = True
+            
+        return (x,y, good_result)
         
 
         
@@ -512,6 +602,7 @@ def rel_pos(d1, A, B):
 def get_position(cmd_q, res_q):
 
     global cap
+    global veh_pos_cm
         
     # to set the sensitivity   
     sensitivity = 250       # the area of the beacon image
@@ -562,19 +653,18 @@ def get_position(cmd_q, res_q):
 
                     # identify the beacon and update it's bearing
                     matched_beacon = identify_beacon_found(obj_cam_angle)
-                    if matched_beacon > 0:
-                        print ('matched_beacon = ', matched_beacon)
+                    if matched_beacon >= 0:
+                        print ('get_position: matched_beacon = ', matched_beacon)
                     
                         # update the position by triangulation
                         veh_pos_cm = update_position()
                 
                         # put the vehicle position on the results queue
-                        type = que.t_vehicle_position
                         data = veh_pos_cm
-                        que.push_queue(res_q, type, data)
+                        que.push_queue(res_q, que.t_vehicle_position, data)
             
                 # rotate the camera by 'n' degrees. For testing set at 10.
-                rotate_cam_360(10)
+                reverse_cmd = rotate_cam_360(10, False)
                 print ('main: cam_bearing = ', cam_bearing)
                       
             # check if this thread needs to exit

@@ -50,7 +50,7 @@ last_work_area_coord = []                       # (x,y) coordinates of last work
 b_start_pos = False                             # state of stop/start button     
 
 # vehicle
-veh_pos = (0,0)                                 # vehicle position (x,y) in pixels
+veh_pos = (0,0)                                 # vehicle position (x,y) in pixels; (0,0) lower left cormer
 veh_color = 'red'
 
 # create the canvas area
@@ -76,6 +76,7 @@ def create_canvas_area():
 def create_status_area():
 
     global sv_beacons
+    global sv_veh_pos
     global b01_entry
     global sv_b01_dist
     
@@ -94,6 +95,13 @@ def create_status_area():
         lbl_beacon1 = Label(frm_sts, textvariable=sv_beacon).grid(column=1, row=var)
         sv_beacons.append(sv_beacon)
 
+    # create the beacon label
+    Label( frm_sts, text='Veh Pos').grid(column=0, row=5, sticky=(N,W))
+
+    # create the vehicel position string variable
+    sv_veh_pos = StringVar(value = '--- , ---')
+    lbl_veh_pos = Label(frm_sts, textvariable=sv_veh_pos).grid(column=1, row=5)
+    
     # create the button to position the vehicle
     btn_set_veh_start_pos = ttk.Button(frm_sts, text ="Set Mower Start Position", command = set_veh_start_pos)
     btn_set_veh_start_pos.grid(column=2, row=5, sticky=(N,W))
@@ -163,8 +171,6 @@ def cnvs_left_click(event):
     global work_area_coord
     global veh_pos
     
-    veh_pos_cm = (0,0)
-    
     # mouse clicks can be related to a range of functions, detremine which function
     # based upon the boolean that was set when the function was requested
     
@@ -176,28 +182,25 @@ def cnvs_left_click(event):
         # clear the X at the last location
         (x_last, y_last) = veh_pos
         
-        # overwrite the last location with red rectangle
-        cnvs.create_rectangle(x_last - 10, y_last - 10, x_last + 10, y_last + 10, outline='red', fill='red')
+        # overwrite the last location with red rectangle; mouse entered coordinates - no conversion required
+        cnvs.create_rectangle(x_last - 10, yc(y_last - 10), x_last + 10, yc(y_last + 10), outline='red', fill='red')
         
-        # write a X at the mouse click location
+        # write a X at the mouse click location; mouse entered coordinates 
         cnvs.create_text(event.x, event.y, text='X', fill = 'black')
         
         # veh_pos is in pixels
-        veh_pos = (event.x, event.y)
+        x_veh = event.x
+        y_veh = yc(event.y)
+        veh_pos = (x_veh, y_veh)
 
         # convert vehicle position to cm
-        x = event.x * cm_pix
-        y = event.y * cm_pix
-        veh_pos_cm = (x,y)
+        x_veh_cm = x_veh * cm_pix
+        y_veh_cm = y_veh * cm_pix
         
-        # send a 'vehicle start position' message to the positioning thread
-        type = que.t_vehicle_start_position
-        data = (veh_pos_cm, cm_pix)                        # package is x ccordinate, y coordinate and the scale factor
-        print ('cnvs_left_click: data = ', data)
-        que.push_queue(cmd_q_thread0, type, data)
-            
-        # save and log
-        h_log.insert('end','Mower ' + ' set at position (' + str(x) + ',' +  str(y) + ') (cm)')
+        # update the numerical vehicle position indication in cm
+        sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm))
+        
+        
         
         
     elif b_set_work_area:
@@ -206,7 +209,7 @@ def cnvs_left_click(event):
         # draw the polynom showing the work area
         print ('cnvs_left_click: b_set_work_area clicked at', event.x, event.y)
         
-        # write a W at the mouse click location to assist in marking out the work area
+        # write a W at the mouse click location to assist in marking out the work area; mouse entered coordinates - no conversion required
         cnvs.create_text(event.x, event.y, text='W', fill = 'black')
         
         # append to the list
@@ -233,6 +236,21 @@ def set_veh_start_pos():
         h_log.insert('end','Set mower start position')
       
     else:
+    
+        # convert vehicle position to cm
+        (x, y) = veh_pos
+        x_veh_cm = x * cm_pix
+        y_veh_cm = y * cm_pix
+        veh_pos_cm = (x_veh_cm,y_veh_cm)
+        
+        # send a 'vehicle start position' message to the positioning thread
+        data = (veh_pos_cm, cm_pix)                        # package is x ccordinate, y coordinate and the scale factor
+        que.push_queue(cmd_q_thread0, que.t_vehicle_start_position, data)
+            
+        # log
+        h_log.insert('end','Mower ' + ' set at position (' + str(x_veh_cm) + ',' +  str(y_veh_cm) + ') cm')
+        
+        # change the button text
         btn_set_veh_start_pos.config(text = 'Set mower start position')
         h_log.insert('end', 'Finished setting mower start position')
     
@@ -271,15 +289,17 @@ def set_work_area():
     
         # all coordinates entered, finialize the creation of the work area
         
-        # first overwrite the W with red rectangle
+        # first overwrite the W with red rectangle; mouse entered coordinates - no conversion required
         for coord in work_area_coord:
             (x, y) = coord
             cnvs.create_rectangle(x - 10, y - 10, x + 10, y + 10, outline='red', fill='red')
 
-        # draw the polynom represnting the work area
-        print (work_area_coord)
+        # draw the polynom representing the work area; mouse entered coordinates - no conversion required
         cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3)
   
+        # now convert the work area to cm and store with lower left origin
+        # tba
+        
         # change the function of the button
         btn_set_work_area.config(text = 'Set Work Area ')
         h_log.insert('end', 'Finish setting Work Area')
@@ -331,7 +351,7 @@ def toggle_position_thread():
 
 
 
-# independant of user generated events, update the HMI every second
+# independent of user generated events, update the HMI every second
 def hmi_update():
 
 
@@ -367,47 +387,72 @@ def hmi_update():
                 
                     print ('type 1 pkg received')
                     
-                    # convert from cm to pizel
-                    x_veh = int(data[0] / cm_pix)         
-                    y_veh = int(data[1] / cm_pix)
+                    # the position is received in cm
+                    x_veh_cm = int(data[0])         
+                    y_veh_cm = int(data[1])
+
+                    # update the numerical vehicle position on the screen
+                    sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm))
+                    
+                    # convert to pixel
+                    x_veh = data[0] / cm_pix         
+                    y_veh = data[1] / cm_pix
                     veh_pos = (x_veh, y_veh)
-                    print ('hmi_update: new x_veh = ', x_veh, ' new y_veh = ', y_veh)
-                
-                # beacon position update
+
+                    print ('hmi_update: new x_veh_cm = ', x_veh_cm, ' new y_veh_cm = ', y_veh_cm, ' cm')
+
+                    
+                # beacon position update - only during beacon discovery
                 elif type == que.t_beacon_position:
 
                     beacon_pos = data
-                    for bcn in range[0,3]:
+                    for bcn in range(0,3):
                     
-                        # unpack the beacon position x,y in cm
-                        (x,y) = beacon_pos[bcn]
+                        # unpack the beacon position x,y received in cm
+                        (x_cm,y_cm) = beacon_pos[bcn]
                         
-                        # convert from cm to pixels
-                        x = x / cm_pix
-                        y = y / cm_pix
+                        # round to 2 decimal places
+                        x_cm = round(x_cm, 2)
+                        y_cm = round(y_cm, 2)
                         
-                        # update the screen
-                        sv_beacon = sv_beacons[beacon_index]
-                        sv_beacon.set(str(x) + ' , ' + str(y))
+                        # update the numerical indication
+                        sv_beacon = sv_beacons[bcn]
+                        sv_beacon.set(str(x_cm) + ' , ' + str(y_cm))
                 
+                        # write a B at the mouse click location
+                        x_pix = int(x_cm / cm_pix)
+                        y_pix = int(y_cm / cm_pix)
+                        cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn), fill = 'black')
+        
             else:
                 print ('hmi_update: pkg expired', pkg)
 
-        # if the vehicle position changed, clear it from the screen
+        # now update the canvas which updated every cycle in order to make a blinking vehicle position
+        
+        # if the vehicle position changed, clear the last position from the screen
         if not (last_veh_pos == veh_pos):
             (x, y) = last_veh_pos
-            cnvs.create_text(x, y, text='X', fill = 'red', font = my_font)  
+            cnvs.create_text(x, yc(y), text='X', fill = 'red', font = my_font)  
 
-        # write a X at the vehicle location
+        # write a X at the vehicle location and blink it
         veh_color = 'red' if veh_color == 'black' else 'black'
-        cnvs.create_text(x_veh, y_veh, text='X', fill = veh_color) 
+        cnvs.create_text(x_veh, yc(y_veh), text='X', fill = veh_color) 
 
         # generate a software event to call this function again after 1 second
         cnvs.after(1000, hmi_update)
     
     
 
+ # y convert - convert canvas origin from upper left corner to lower left corner and vice versa
+def yc(y):
+
+    # for (x,y) coordinates, only y is converted:
+    # (0,0)         -> (0,p_y_sz)
+    # (0,p_y_sz/2)  -> (0,p_y_sz/2)
+    # (0,p_y_sz)    -> (0,0)
     
+    y = -y + p_y_sz    
+    return (y)   
 
     
     
