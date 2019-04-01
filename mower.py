@@ -40,6 +40,7 @@ b_set_veh_start_pos = False                     # state of the set vehicle butto
 beacon_index = 0                                # the beacon to be changed [0-2]
 beacon_coord = np.array([(0,0),(0,0),(0,0)])    # (x,y) coordinates of beacons 1, 2 and 3 in pixels
 beacon_pos = np.array([(0,0),(0,0),(0,0)])      # (x,y) coordinates of beacons 1, 2 and 3 in cm
+h_beacon_pos = [None, None, None]               # handles to beacon positions on canvas
     
 # work area
 b_set_work_area = False
@@ -52,10 +53,17 @@ b_start_pos = False                             # state of stop/start button
 # vehicle
 veh_pos = (0,0)                                 # vehicle position (x,y) in pixels; (0,0) lower left cormer
 veh_color = 'red'
+h_veh_pos = None                                # handle to vehicle object on canvas
+
+# grid
+b_grid = False                                  # state of the grid on the canvas
 
 # create the canvas area
 def create_canvas_area():
 
+    global h_veh_pos
+    global h_beacon_pos
+    
     # create the main frame
     frm_cnvs = ttk.Frame(content, padding=(20, 20, 20, 20 ))
     frm_cnvs.grid(column=0, row=0, sticky=(N,W,S,E))
@@ -66,6 +74,20 @@ def create_canvas_area():
     cnvs = Canvas(frm_cnvs, bg="red", height=p_x_sz, width=p_y_sz)
     cnvs.grid()
 
+    # mark the intial positions of the objects on the canvas, this is to streamline
+    # later updates that first delete and then recreate the object when it moves
+    
+    # vehicle position
+    (x,y) = veh_pos
+    h_veh_pos = cnvs.create_text(x, yc(y), text='X', fill = 'black') 
+    
+    # beacon position
+    for bcn in range(3):
+        (x,y) = beacon_pos[bcn]
+        h_beacon_pos[bcn] = cnvs.create_text(x, yc(y), text='B', fill = 'black')
+        
+    print ('create_canvas_area: h_beacon_pos = ', h_beacon_pos)
+    
     # capture the left mouse button when clicked
     cnvs.bind("<Button-1>", cnvs_left_click)   
 
@@ -95,10 +117,17 @@ def create_status_area():
         lbl_beacon1 = Label(frm_sts, textvariable=sv_beacon).grid(column=1, row=var)
         sv_beacons.append(sv_beacon)
 
+    # create the grid label
+    Label( frm_sts, text='Grid').grid(column=0, row=4, sticky=(N,W))
+
+    # create the button to switch the grid on and off
+    btn_grid = ttk.Button(frm_sts, text ="Grid On", command = toggle_grid)
+    btn_grid.grid(column=2, row=4, sticky=(N,W))
+    
     # create the beacon label
     Label( frm_sts, text='Veh Pos').grid(column=0, row=5, sticky=(N,W))
 
-    # create the vehicel position string variable
+    # create the vehicle position string variable
     sv_veh_pos = StringVar(value = '--- , ---')
     lbl_veh_pos = Label(frm_sts, textvariable=sv_veh_pos).grid(column=1, row=5)
     
@@ -160,6 +189,37 @@ def create_command_area():
     return (frm_cmd)
 
 
+# toggle the grid on and off
+def toggle_grid():
+
+    global b_grid
+    
+    grid_size_pix = int(round(150 / cm_pix, 0))        # grid size 
+    
+    if b_grid:
+    
+        # delete the grid
+        cnvs.delete("grid_lines")
+        b_grid = False
+    
+    else:
+        # draw the grid
+        
+        w = cnvs.winfo_width()          # Get current width of canvas
+        h = cnvs.winfo_height()         # Get current height of canvas
+        cnvs.delete('grid_lines')       # Will only remove the grid_lines
+
+        # Creates all vertical lines at intevals of 100
+        for i in range(0, w, grid_size_pix):
+            cnvs.create_line([(i, 0), (i, h)], tag='grid_lines')
+
+        # Creates all horizontal lines at intevals of 100
+        for i in range(0, h, grid_size_pix):
+            cnvs.create_line([(0, i), (w, i)], tag='grid_lines')
+
+        b_grid = True
+        
+    return()
 
     
 # left mouse clicks on canvas
@@ -170,6 +230,8 @@ def cnvs_left_click(event):
         
     global work_area_coord
     global veh_pos
+    global h_veh_pos
+    
     
     # mouse clicks can be related to a range of functions, detremine which function
     # based upon the boolean that was set when the function was requested
@@ -182,11 +244,11 @@ def cnvs_left_click(event):
         # clear the X at the last location
         (x_last, y_last) = veh_pos
         
-        # overwrite the last location with red rectangle; mouse entered coordinates - no conversion required
-        cnvs.create_rectangle(x_last - 10, yc(y_last - 10), x_last + 10, yc(y_last + 10), outline='red', fill='red')
+        # clear the last location of the vehicle
+        cnvs.delete(h_veh_pos)
         
         # write a X at the mouse click location; mouse entered coordinates 
-        cnvs.create_text(event.x, event.y, text='X', fill = 'black')
+        h_veh_pos = cnvs.create_text(event.x, event.y, text='X', fill = 'black')
         
         # veh_pos is in pixels
         x_veh = event.x
@@ -210,7 +272,7 @@ def cnvs_left_click(event):
         print ('cnvs_left_click: b_set_work_area clicked at', event.x, event.y)
         
         # write a W at the mouse click location to assist in marking out the work area; mouse entered coordinates - no conversion required
-        cnvs.create_text(event.x, event.y, text='W', fill = 'black')
+        cnvs.create_text(event.x, event.y, text='W', fill = 'black', tag="tag_work_area_markers")
         
         # append to the list
         work_area_coord.append((event.x, event.y))
@@ -275,27 +337,26 @@ def set_work_area():
         # start fresh
         work_area_coord = []
     
-        # draw a polynom in background color to clear
+        # clear the work area if it exists by tag
         if not (last_work_area_coord == []):
             print ('set_work_area: last_work_area_coord =', last_work_area_coord)
-            cnvs.create_polygon(last_work_area_coord, outline='red', fill='red', width=3)
-  
+            cnvs.delete("tag_work_area")
+            
         # change the function of the button
         btn_set_work_area.config(text = 'Finish Work Area')
         h_log.insert('end','Setting Work Area')
+        
         
         
     else:
     
         # all coordinates entered, finialize the creation of the work area
         
-        # first overwrite the W with red rectangle; mouse entered coordinates - no conversion required
-        for coord in work_area_coord:
-            (x, y) = coord
-            cnvs.create_rectangle(x - 10, y - 10, x + 10, y + 10, outline='red', fill='red')
+        # first clear the temporary work area markers 
+        cnvs.delete("tag_work_area_markers")    
 
         # draw the polynom representing the work area; mouse entered coordinates - no conversion required
-        cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3)
+        cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
   
         # now convert the work area to cm and store with lower left origin
         # tba
@@ -355,9 +416,10 @@ def toggle_position_thread():
 def hmi_update():
 
 
-        global veh_pos
         global veh_color
-
+        global veh_pos
+        global h_veh_pos
+        global h_beacon_pos
         
         
         pkgs = []
@@ -419,25 +481,24 @@ def hmi_update():
                         sv_beacon = sv_beacons[bcn]
                         sv_beacon.set(str(x_cm) + ' , ' + str(y_cm))
                 
+                        # delete the previous beacon from the canvas
+                        cnvs.delete(h_beacon_pos[bcn])
+                        
                         # write a B at the mouse click location
                         x_pix = int(x_cm / cm_pix)
                         y_pix = int(y_cm / cm_pix)
-                        cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn), fill = 'black')
+                        h_beacon_pos[bcn] = cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn), fill = 'black')
         
             else:
                 print ('hmi_update: pkg expired', pkg)
 
         # now update the canvas which updated every cycle in order to make a blinking vehicle position
-        
-        # if the vehicle position changed, clear the last position from the screen
-        if not (last_veh_pos == veh_pos):
-            (x, y) = last_veh_pos
-            cnvs.create_text(x, yc(y), text='X', fill = 'red', font = my_font)  
-
+        cnvs.delete(h_veh_pos)
+            
         # write a X at the vehicle location and blink it
         veh_color = 'red' if veh_color == 'black' else 'black'
-        cnvs.create_text(x_veh, yc(y_veh), text='X', fill = veh_color) 
-
+        h_veh_pos = cnvs.create_text(x_veh, yc(y_veh), text='X', fill = veh_color) 
+        
         # generate a software event to call this function again after 1 second
         cnvs.after(1000, hmi_update)
     
