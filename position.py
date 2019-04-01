@@ -659,9 +659,9 @@ def get_position(cmd_q, res_q):
                         # update the position by triangulation
                         veh_pos_cm = update_position()
                 
-                        # put the vehicle position on the results queue
+                        # put the vehicle position by triangulation on the results queue
                         data = veh_pos_cm
-                        que.push_queue(res_q, que.t_vehicle_position, data)
+                        que.push_queue(res_q, que.t_vehicle_position_tri, data)
             
                 # rotate the camera by 'n' degrees. For testing set at 10.
                 reverse_cmd = rotate_cam_360(10, False)

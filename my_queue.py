@@ -6,8 +6,9 @@ import time
 # package types
 t_message = 1
 t_vehicle_start_position = 2
-t_vehicle_position = 3
+t_vehicle_position_tri = 3
 t_beacon_position = 4
+t_start_mowing = 5
 
 expire_threshold = 60        # threshold in seconds when queue pkg expire
 

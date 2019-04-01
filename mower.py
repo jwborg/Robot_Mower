@@ -16,11 +16,12 @@ import tkinter.font # bold
 
 # thread imports
 import position as pos
+import mowing as mow
 import my_queue as que
 
 # global variable shared outside main
 pos.kill_thread0 = False                        # flag to kill thread 0 
-
+pos.kill_thread1 = False                        # flag to kill thread 1 
 
 # global variables within main - not shared with threads
 
@@ -45,11 +46,13 @@ h_beacon_pos = [None, None, None]               # handles to beacon positions on
 # work area
 b_set_work_area = False
 work_area_coord = []                            # (x,y) coordinates of work area in pixels
+work_area_coord_cm = []                         # (x,y) coordinates of work area in cm
 last_work_area_coord = []                       # (x,y) coordinates of last work arae in pixels
 
 # starting and stopping of threads
-b_start_pos = False                             # state of stop/start button     
-
+b_start_pos = False                             # state of positioning stop/start button     
+b_start_mowing = False                          # state of mowings stop/start button
+ 
 # vehicle
 veh_pos = (0,0)                                 # vehicle position (x,y) in pixels; (0,0) lower left cormer
 veh_color = 'red'
@@ -57,6 +60,8 @@ h_veh_pos = None                                # handle to vehicle object on ca
 
 # grid
 b_grid = False                                  # state of the grid on the canvas
+
+
 
 # create the canvas area
 def create_canvas_area():
@@ -86,7 +91,7 @@ def create_canvas_area():
         (x,y) = beacon_pos[bcn]
         h_beacon_pos[bcn] = cnvs.create_text(x, yc(y), text='B', fill = 'black')
         
-    print ('create_canvas_area: h_beacon_pos = ', h_beacon_pos)
+    #print ('create_canvas_area: h_beacon_pos = ', h_beacon_pos)
     
     # capture the left mouse button when clicked
     cnvs.bind("<Button-1>", cnvs_left_click)   
@@ -101,6 +106,7 @@ def create_status_area():
     global sv_veh_pos
     global b01_entry
     global sv_b01_dist
+    global mow_pattern
     
     # create the main frame
     frm_sts = ttk.Frame(content, padding=(20, 20, 20, 20 ))
@@ -149,7 +155,21 @@ def create_status_area():
     btn_toggle_pos = ttk.Button(frm_sts, text ="Start", command = toggle_position_thread)
     btn_toggle_pos.grid(column=2, row=7, sticky=(N,W))
     
-    return (frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_pos)
+    # create the Mowing label
+    Label( frm_sts, text='Mowing').grid(column=0, row=8, sticky=(N,W))
+    
+    # create the radio buttons for mowing patterns
+    mow_pattern =  IntVar()
+    mow_pattern.set(1)
+    Radiobutton(frm_sts ,text="Traditional",variable=mow_pattern,value=1).grid(row = 8,column = 1, sticky=(N,W))
+    Radiobutton(frm_sts ,text="Nautilus",variable=mow_pattern,value=2).grid(row = 9,column = 1, sticky=(N,W))
+    Radiobutton(frm_sts ,text="Random",variable=mow_pattern,value=3).grid(row = 10,column = 1, sticky=(N,W))
+    
+    # create the button to start/stop mowing
+    btn_toggle_mow = ttk.Button(frm_sts, text ="Start", command = toggle_mowing_thread)
+    btn_toggle_mow.grid(column=2, row=8, sticky=(N,W))
+    
+    return (frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_pos, btn_toggle_mow)
 
     
 def create_logging_area():
@@ -323,6 +343,7 @@ def set_work_area():
     
     global b_set_work_area
     global work_area_coord
+    global work_area_coord_cm
     global last_work_area_coord
     
     # toggle the flag as entering the coordinates will be handle by left_mouse()
@@ -359,7 +380,15 @@ def set_work_area():
         cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
   
         # now convert the work area to cm and store with lower left origin
-        # tba
+        work_area_coord_cm
+        for coord in work_area_coord:
+            (x,y) = coord
+            
+            # change origin to (0,0) and convert to cm
+            x_cm = x * cm_pix
+            y_cm = yc(y) * cm_pix
+            coord_cm = (x_cm, y_cm)
+            work_area_coord_cm.append(coord_cm)
         
         # change the function of the button
         btn_set_work_area.config(text = 'Set Work Area ')
@@ -408,7 +437,56 @@ def toggle_position_thread():
             if not t0.is_alive():
                 return()
                  
+                 
+# start / stop mowing
+def toggle_mowing_thread():
 
+    global t1
+    global kill_thread_1
+    
+
+    global b_start_mowing
+    
+    # toggle the flag as the event will be handle by left_mouse()
+    b_start_mowing = not b_start_mowing
+    
+    # change the button text
+    if b_start_mowing:
+        btn_toggle_mow.config(text = 'Stop')
+        h_log.insert('end','Starting mowing')
+        
+        # start the positioning thread
+        mow.kill_thread_1 = False
+        t1 = threading.Thread(target=mow.mowing, args=(cmd_q_thread1, res_q_thread1))
+        t1.start() 
+
+        # get the mowing pattern
+        mowing_pattern = mow_pattern.get()
+        
+        # the current position is the starting position 
+        (x,y) = veh_pos
+        x_veh_cm = x * cm_pix         
+        y_veh_cm = y * cm_pix
+        veh_pos_cm = (x_veh_cm, y_veh_cm)
+        
+        # sent the mowing information: start position, mower pattern and work area
+        data = (veh_pos_cm, mowing_pattern, work_area_coord_cm)                    
+        que.push_queue(cmd_q_thread1, que.t_start_mowing, data)
+        
+    
+    else:
+        btn_toggle_mow.config(text = 'Start ')
+        h_log.insert('end', 'Stopping mowing')
+        
+        # set the kill signal
+        mow.kill_thread_1 = True
+
+        # wait until the thread has stopped
+        while True:
+            if not t1.is_alive():
+                return()
+                
+                 
 
 
 
@@ -444,10 +522,13 @@ def hmi_update():
                 
                     h_log.insert('end', data )
                 
-                # vehicle position update
-                elif type == que.t_vehicle_position:
+                # vehicle position as detected by triangulation
+                elif type == que.t_vehicle_position_tri:
                 
-                    print ('type 1 pkg received')
+                    
+                    # send the vehicle position to the mowing thread only when active
+                    if b_start_mowing:
+                        que.push_queue(cmd_q_thread1, que.t_start_mowing, data)
                     
                     # the position is received in cm
                     x_veh_cm = int(data[0])         
@@ -548,7 +629,7 @@ content.grid_rowconfigure(2, weight=1)                 # maximum 2 rows in main 
 (frm_cnvs, cnvs) = create_canvas_area()
 
 # Create and grid the status frame
-(frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_pos) = create_status_area()
+(frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_pos, btn_toggle_mow) = create_status_area()
 
 # create and grid the loggin area
 (frm_log, h_log) = create_logging_area()
@@ -560,8 +641,12 @@ frm_cmd = create_command_area()
 h_log.insert('end', 'Ready' )
 
 # start the command and result queue for thread 0 (positioning)
-cmd_q_thread0 = queue.Queue()                       # command to the positioning thread
+cmd_q_thread0 = queue.Queue()                       # commands to the positioning thread
 res_q_thread0 = queue.Queue()                       # results from the positioning thread
+
+# start the command and result queue for thread 1 (mowing)
+cmd_q_thread1 = queue.Queue()                       # commands to the mowing thread
+res_q_thread1 = queue.Queue()                       # results from the mowing thread
 
 # start the scheduled hmi update (vehicle position etc)
 hmi_update()
