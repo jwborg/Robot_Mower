@@ -162,7 +162,7 @@ def create_status_area():
     mow_pattern =  IntVar()
     mow_pattern.set(1)
     Radiobutton(frm_sts ,text="Traditional",variable=mow_pattern,value=1).grid(row = 8,column = 1, sticky=(N,W))
-    Radiobutton(frm_sts ,text="Nautilus",variable=mow_pattern,value=2).grid(row = 9,column = 1, sticky=(N,W))
+    Radiobutton(frm_sts ,text="Spiral",variable=mow_pattern,value=2).grid(row = 9,column = 1, sticky=(N,W))
     Radiobutton(frm_sts ,text="Random",variable=mow_pattern,value=3).grid(row = 10,column = 1, sticky=(N,W))
     
     # create the button to start/stop mowing
