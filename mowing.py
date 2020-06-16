@@ -1,4 +1,4 @@
-# !/home/pi/.virtualenvs/cv/bin/python
+#!/usr/bin/python3
 
 import numpy as np
 import math

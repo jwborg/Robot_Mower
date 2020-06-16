@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 from tkinter import *
 from tkinter import ttk
@@ -14,10 +14,21 @@ import threading
 import queue
 import tkinter.font # bold
 
+
 # thread imports
 import position as pos
 import mowing as mow
 import my_queue as que
+import my_gpio 
+
+# only import the RPi.GPIO on Raspberry; Windows 10 has no GPIO 
+try:
+    import RPi.GPIO as GPIO
+    my_gpio.Im_a_Raspberry = True
+    print ('import RPiGPIO ok')
+except:
+    my_gpio.Im_a_Raspberry = False
+    print ('RPiGPIO not found')
 
 # global variable shared outside main
 pos.kill_thread0 = False                        # flag to kill thread 0 
@@ -432,10 +443,15 @@ def toggle_position_thread():
         # set the kill signal
         pos.kill_thread_0 = True
 
+        # and close the video windows
+        cv2.destroyAllWindows() 
+        
         # wait until the thread has stopped
         while True:
             if not t0.is_alive():
                 return()
+                
+        
                  
                  
 # start / stop mowing
@@ -509,7 +525,7 @@ def hmi_update():
         
         # get the position of the vehicle
         pkgs = que.get_queue(res_q_thread0)
-        print ('hmi_update: pkgs = ', pkgs)
+        #print ('hmi_update: pkgs = ', pkgs)
         
         # unpack the package
         for pkg in pkgs:
@@ -570,6 +586,13 @@ def hmi_update():
                         y_pix = int(y_cm / cm_pix)
                         h_beacon_pos[bcn] = cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn), fill = 'black')
         
+                elif type == que.t_video_frame:
+                
+                    # show video window if positioning is active
+                    if not pos.kill_thread_0:
+                        frame = data
+                        cv2.imshow('Infrared view', frame)
+            
             else:
                 print ('hmi_update: pkg expired', pkg)
 
@@ -585,7 +608,7 @@ def hmi_update():
     
     
 
- # y convert - convert canvas origin from upper left corner to lower left corner and vice versa
+# y convert - convert canvas origin from upper left corner to lower left corner and vice versa
 def yc(y):
 
     # for (x,y) coordinates, only y is converted:
@@ -596,18 +619,45 @@ def yc(y):
     y = -y + p_y_sz    
     return (y)   
 
+
+# when the close window X is clicked
+def on_closing():
+
+    # On a Raspberry, release the GPIO
+    if my_gpio.Im_a_Raspberry:
+        GPIO.cleanup()
+
+    # and exit
+    root.destroy()
     
+
+# set up the GPIO for all motors
+def setup_GPIO():
+
+    # setup the GPIO numbering scheme
+    GPIO.setmode(GPIO.BCM)
     
+    # camera rotation
+    GPIO.setup(my_gpio.cr_DIR_PIN, GPIO.OUT)
+    GPIO.setup(my_gpio.cr_STEP_PIN, GPIO.OUT)
+    GPIO.output(my_gpio.cr_DIR_PIN, my_gpio.CW)     # start clock wise
+
+    print('GPIO setup completed')
     
  
 #############################################################################   
 # main
 
 
-
+# On a Raspberry only, set up the GPIO 
+if my_gpio.Im_a_Raspberry:
+    setup_GPIO()
+    
 
 root = Tk()
 
+# setup the protocol handler when the user closes the window
+root.protocol("WM_DELETE_WINDOW", on_closing)
 
 # create a bold font to overwrite test that needs to be deleted on the canvas
 my_font =  tkinter.font.Font(family='Arial', size = 10, weight = 'bold')

@@ -1,4 +1,4 @@
-# !/home/pi/.virtualenvs/cv/bin/python
+#!/usr/bin/python3
 
 import cv2
 import numpy as np
@@ -8,6 +8,31 @@ import time
 
 # application imports
 import my_queue as que
+import my_gpio
+
+# only import the RPi.GPIO on Raspberry; Windows 10 has no GPIO 
+try:
+    import RPi.GPIO as GPIO
+    my_gpio.Im_a_Raspberry = True
+    print ('position: import RPiGPIO ok')
+except:
+    my_gpio.Im_a_Raspberry = False
+    print ('position: RPiGPIO not found')
+    
+# only import the QMC5883L driver on raspberry; Windows 10 has no I2C bus
+try:
+    import py_qmc5883l
+    compass_present = False
+    print ('QMC8553L compass passed')
+    # set the compass calibration
+    #sensor = py_qmc5883l.QMC5883L()
+    #sensor.calibration = [[1.0114098955206197, -0.027113265665540898, -581.7816430010785], [-0.027113265665540842, 1.064429089093909, -3488.366725677899], [0.0, 0.0, 1.0]]
+except:
+    compass_present = False
+    print ('QMC8553L compass not present')
+       
+
+    
     
 # global variables - shared outside this thread
 
@@ -29,7 +54,7 @@ beacon_red   = 2
 abs_bear_veh = 0.0                              # current bearing of vehicle
 beacon = 1                                      # the current beacon (1-based)
 last_abs_bear_beacon = [ -1.0, -1.0, -1.0]      # last absolute bearing of the beacon
-#last_abs_bear_beacon = [ 350.0, 60.0, 120.0]    # last absolute bearing of the beacon
+#last_abs_bear_beacon = [ 350.0, 60.0, 120.0]   # last absolute bearing of the beacon
 beacon_last_update = [0,0,0]                    # last update time of beacon in seconds since epoch
 beacon_fresh = [ '+inf' , '+inf', '+inf' ]      # seconds since last update
 fresh_thres = 60.0                              # threshold in seconds to determine beacon freshness
@@ -51,17 +76,25 @@ beacons_defined = False
 beacon_pos = np.array([(0.0,0.0),(0.0,0.0),(0.0,0.0)])      # (x,y) coordinates of beacons 1, 2 and 3 in cm
 
 # vehicle position
-cur_bear_veh = 0.0                  # vehicle bearing in degrees from North on work area
 veh_pos_cm = [0.0,0.0]              # (x,y) position in cm within square of work area
 
+# get the compass bearing from the QMC5883L compass
+def get_compass_bearing():
+
+    if compass_present:
+        b = sensor.get_bearing()
+    else:
+        b = 0.0
+    return (b)
+
 
     
-def get_beacon(cap, sensitivity, active_angle):
-    
+def get_beacon(cap, sensitivity, active_angle, res_q):
     
     # Logitech 710
     # maximum view angle is 44 degrees
     # resolution is 320 x 240 pixels
+    
     cam_h_pixels = 320
     cam_max_angle = 44
     degree_pix = cam_max_angle / cam_h_pixels    # pixels per horizontal degree
@@ -74,60 +107,79 @@ def get_beacon(cap, sensitivity, active_angle):
     obj_cam_angle = 0
     
     # get a frame
-    _, frame = cap.read()
-
-    # use a filter to blur the image and get rid of noise
-    blurred_frame = cv2.GaussianBlur(frame, (5,5), 0)
-    
-    # convert to HSV colors for easy color detection
-    hsv =cv2.cvtColor(blurred_frame, cv2.COLOR_BGR2HSV)
-    
-    # tuned color for white as shown by IR camera
-    lower_col = np.array([0, 0, 200])
-    upper_col = np.array([180,50,255])
-    mask = cv2.inRange(hsv, lower_col, upper_col)
-    
-    # find the contours, will be returned in array contours
-    _, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-    
-    # determine the area of the contour
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        #print ("area = ", area)
+    ret, frame = cap.read()
+    if not ret:
+        print ("get_beacon: Error reading video device")
+    else:
+             
+        # use a filter to blur the image and get rid of noise
+        blurred_frame = cv2.GaussianBlur(frame, (5,5), 0)
         
-        # select only the large contour to get rid of any remaining noise 
-        if area > sensitivity:
-                 
-            # determine the x,y location of the contour in the frame
-            m = cv2.moments(contour)
-            center = (int(m['m10'] / m['m00']), int(m['m01'] / m['m00']))
-            #print ("center = ", center[0])
+        # convert to HSV colors for easy color detection
+        hsv =cv2.cvtColor(blurred_frame, cv2.COLOR_BGR2HSV)
+        
+        # tuned color for white as shown by IR camera
+        lower_col = np.array([0, 0, 200])
+        upper_col = np.array([180,50,255])
+        mask = cv2.inRange(hsv, lower_col, upper_col)
+        
+        # find the contours, will be returned in array contours
+        _, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+        
+        # determine the area of the contour
+        for contour in contours:
+        
+            area = cv2.contourArea(contour)
+            #print ("area = ", area)
             
-            # calculate the angle from the center line of the contour as seen by the 
-            # camera; center[0] is the X coordinate
-            obj_cam_angle = degree_pix * (center[0] - cam_h_pixels / 2)
-            
-            # determine if the contour is in the requested active angle
-            if abs(obj_cam_angle) < active_angle:
+            # select only the large contour to get rid of any remaining noise 
+            if area > sensitivity:
+                     
+                # determine the x,y location of the contour in the frame
+                m = cv2.moments(contour)
+                center = (int(m['m10'] / m['m00']), int(m['m01'] / m['m00']))
+                #print ("center = ", center[0])
+                
+                # calculate the angle from the center line of the contour as seen by the 
+                # camera; center[0] is the X coordinate
+                obj_cam_angle = degree_pix * (center[0] - cam_h_pixels / 2)
+                
+                # determine if the contour is in the requested active angle
+                if abs(obj_cam_angle) < active_angle:
 
-                color = (0,255,0)       # green colour, inside active angle
-                status = beacon_green
-            else:
-                color = (0,0,255)       # red colour, outside requested active angle
-                status = beacon_red
-            
-            # draw the contours on the original frame; -1 means all contours found
-            cv2.drawContours(frame, contour, -1, color, pen_width)
-            
-            
-    # for debugging            
-    cv2.imshow("Frame", frame)
+                    color = (0,255,0)       # green colour, inside active angle
+                    status = beacon_green
+                else:
+                    color = (0,0,255)       # red colour, outside requested active angle
+                    status = beacon_red
+                
+                # draw the contours on the original frame; -1 means all contours found
+                cv2.drawContours(frame, contour, -1, color, pen_width)
+                
+        # for debugging only; post the frame to the main thread (pretty slow) 
+        # don't attempt to show the frame in this tread; timing issues and even slower
+        data = frame
+        que.push_queue(res_q, que.t_video_frame, data)
        
     return (status, obj_cam_angle)
 
 # rotate the camera by the requested number of steps (positive or negative) 
-def rotate_cam(no_steps):
+def rotate_cam(no_steps, direction):
 
+    # delay in seconds for 48 step stepping motor
+    delay = .0208 / 16
+
+    if my_gpio.Im_a_Raspberry:
+        # set the direction
+        GPIO.output(my_gpio.cr_DIR_PIN, direction)
+        
+        # and rotate for the requestde number of steps
+        for x in range(no_steps):
+            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.HIGH)
+            time.sleep(delay)
+            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.LOW)
+            time.sleep(delay)
+    
     return()
     
 
@@ -141,8 +193,8 @@ def rotate_cam_360(incr_angle, reverse_cmd):
     max_bearing = 360
     min_bearing = 0
     
-    #steps_rev = 48                  # steps per revolution
-    steps_rev = 36                  # steps per revolution
+    micro_step = 16                 # number of micro steps in step      
+    steps_rev = 48 * micro_step     # steps per revolution
     one_step = 360 / steps_rev      # degrees per step
     
     # if a reverse command is given, reverse the direction. This is used during discovery of the beacons.
@@ -150,15 +202,15 @@ def rotate_cam_360(incr_angle, reverse_cmd):
         cam_rot_clockwise = not cam_rot_clockwise
     
     # the effective angle to rotate is determined by the stepping motor, so adjust the requested angle to the closest number of steps, with a minimum of 1 step. So the effective angle may differ from the requested angle.
-    no_steps = max(round(incr_angle / one_step,0), 1)
+    no_steps = int(max(round(incr_angle / one_step,0), 1))
     print ('rotate_cam_360: no_steps = ', no_steps)
     
     # rotate the camera by approximately the calculated number of steps
     if cam_rot_clockwise:
-        rotate_cam(no_steps)
+        rotate_cam(no_steps, cam_rot_clockwise)
         cam_bearing = cam_bearing + no_steps * one_step
     else:
-        rotate_cam(no_steps * -1)
+        rotate_cam(no_steps, cam_rot_clockwise)
         cam_bearing = cam_bearing - no_steps * one_step
     
     # if a change in direction is required
@@ -185,6 +237,11 @@ def identify_beacon_found(obj_cam_angle):
     
     # determine the beacon bearing relative to the vehicle
     rel_cam = cam_bearing + obj_cam_angle
+    
+    # get the current vehicle bearing
+    abs_bear_veh = get_compass_bearing()
+    
+    # this will give the absolute bearing of the beacon
     abs_bear_beacon_cur = math.fmod(abs_bear_veh + rel_cam, 360)
     print ('identify_beacon_found: abs_bear_beacon_cur = ', abs_bear_beacon_cur, last_abs_bear_beacon)
     
@@ -318,12 +375,12 @@ def update_position():
     return(-1,-1)
   
 def get_bear_diff(bear1, bear2):
-	r = (bear2 - bear1) % 360.0
-	# Python modulus has same sign as divisor, which is positive here,
-	# so no need to consider negative case
-	if r >= 180.0:
-		r -= 360.0
-	return r
+    r = (bear2 - bear1) % 360.0
+    # Python modulus has same sign as divisor, which is positive here,
+    # so no need to consider negative case
+    if r >= 180.0:
+        r -= 360.0
+    return r
     
   
 def get_m(bearing):
@@ -381,10 +438,9 @@ def get_quality(freshness, bear_delta):
 
 
  
- 
 
 # discover the position of the beacons sequence
-def discover_next_beacon(res_q):
+def discover_next_beacon(cap, res_q):
 
     global cam_bearing
     global beacons_defined
@@ -394,7 +450,7 @@ def discover_next_beacon(res_q):
     sensitivity = 250       # the area of the beacon image
     active_angle = 10       # the angle in the frame where objects will be reported
     rot_deg = 10            # degrees to rotate the camera by 
-    
+    loop_delay = 1.0        # delay in second between camera measurements
     
     # when starting the discovery, continue the camara rotation as is
     reverse_cmd = False
@@ -418,8 +474,8 @@ def discover_next_beacon(res_q):
             while abs_bear_beacon_cur_1 < 0:
 
                 # get a bearing from the videostream, set a small active angle for accuracy
-                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle)
-                print ('main: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
+                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle, res_q)
+                print ('discover_next_beacon: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
 
                 print ('discover_next_beacon: cam_bearing = ', cam_bearing)
                 
@@ -428,6 +484,11 @@ def discover_next_beacon(res_q):
                 
                     # determine the beacon bearing relative to the vehicle
                     rel_cam = cam_bearing + obj_cam_angle
+                    
+                    # get the current vehicle bearing
+                    abs_bear_veh = get_compass_bearing()
+                    
+                    # this will give the absolute bearing to the beacon
                     abs_bear_beacon_cur_1 = math.fmod(abs_bear_veh + rel_cam, 360)
                     print ('discover_next_beacon: abs_bear_beacon_cur_1 = ', abs_bear_beacon_cur_1)
                     
@@ -443,7 +504,7 @@ def discover_next_beacon(res_q):
                     return()
                 
                 # slow the loop down
-                time.sleep(5)
+                time.sleep(loop_delay)
         
             # first bearing obtained; drive vehicle forward to position 2
             
@@ -462,7 +523,7 @@ def discover_next_beacon(res_q):
             while abs_bear_beacon_cur_2 < 0:
 
                 # get a bearing from the videostream, set a small active angle for accuracy
-                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle)
+                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle, res_q)
                 print ('discover_next_beacon: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
 
                 print ('discover_next_beacon: cam_bearing = ', cam_bearing)
@@ -472,6 +533,11 @@ def discover_next_beacon(res_q):
                 
                     # determine the beacon bearing relative to the vehicle
                     rel_cam = cam_bearing + obj_cam_angle
+                    
+                    # get the current vehicle bearing
+                    abs_bear_veh = get_compass_bearing()
+                    
+                    # this will give the absolute bearing to the beacon
                     abs_bear_beacon_cur_2 = math.fmod(abs_bear_veh + rel_cam, 360)
                     print ('discover_next_beacon: abs_bear_beacon_cur_2 = ', abs_bear_beacon_cur_2)
                     
@@ -487,7 +553,7 @@ def discover_next_beacon(res_q):
                     return()
         
                 # slow the loop down
-                time.sleep(5)
+                time.sleep(loop_delay)
         
             # second bearing obtained; drive vehicle back to position 1
             print ('discover_next_beacon: 2nd bearing obtained')
@@ -500,7 +566,7 @@ def discover_next_beacon(res_q):
 
             # calculate the distance between position 1 and 2
             #distance = sqrt((x2-x1)**2 + (y2-y1)**2)
-            distance = 500.0            # in cm
+            distance = 100.0            # in cm
             
             # calculate the beacon position relative to position 1
             (x_rel_cm,y_rel_cm, good_result) = rel_pos(distance, abs_bear_beacon_cur_1, abs_bear_beacon_cur_2)
@@ -547,7 +613,9 @@ def discover_next_beacon(res_q):
             if beacons_defined:
                 data = "Beacon discovery completed, starting orientation sequence" 
                 que.push_queue(res_q, que.t_message, data)
-                
+    
+    return()
+    
                 
                 
                 
@@ -594,14 +662,12 @@ def rel_pos(d1, A, B):
             # indicate good calculation
             good_result = True
             
-        return (x,y, good_result)
-        
+        return (x,y, good_result)             
 
-        
+
 # the main for thread get_position
 def get_position(cmd_q, res_q):
 
-    global cap
     global veh_pos_cm
         
     # to set the sensitivity   
@@ -615,7 +681,8 @@ def get_position(cmd_q, res_q):
         # set the required resolution
         ret = cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
         ret = cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
-
+        ret = cap.set(cv2.CAP_PROP_FPS,5)               # 5 Frames per second
+        
         while True:
             
             print ('\n\nkill_thread_0 = ', kill_thread_0)
@@ -638,15 +705,14 @@ def get_position(cmd_q, res_q):
             
             # all beacons defined?
             if  not beacons_defined:
-            
-                discover_next_beacon(res_q)
+                discover_next_beacon(cap, res_q)
                 
             # the beacons are defined
             else:
             
                 # get a bearing from the videostream and 
-                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle)
-                print ('main: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
+                (status, obj_cam_angle) = get_beacon(cap, sensitivity, active_angle, res_q)
+                print ('get_position: obj_cam_angle = ', obj_cam_angle, 'status = ', status)
                 
                 # when a beacon is in the valid zone
                 if (status == beacon_green):
@@ -665,14 +731,13 @@ def get_position(cmd_q, res_q):
             
                 # rotate the camera by 'n' degrees. For testing set at 10.
                 reverse_cmd = rotate_cam_360(10, False)
-                print ('main: cam_bearing = ', cam_bearing)
+                print ('get_position: cam_bearing = ', cam_bearing)
                       
             # check if this thread needs to exit
             if kill_thread_0:
 
                 # shutdown the video stream    
-                cap.release()
-                cv2.destroyAllWindows()            
+                cap.release()        
                 return()
             
             # sleep for 100 ms. time.sleep has issues with video capture, so use waitkey
@@ -681,6 +746,6 @@ def get_position(cmd_q, res_q):
             
             
     else:
-        print ("main: Could not open camera device, exiting")
+        print ("get_position: Could not open camera device, exiting")
         
     return()
