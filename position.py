@@ -22,14 +22,14 @@ except:
 # only import the QMC5883L driver on raspberry; Windows 10 has no I2C bus
 try:
     import py_qmc5883l
-    compass_present = False
-    print ('QMC8553L compass passed')
+    compass_present = True
+    print ('position: QMC8553L library passed')
     # set the compass calibration
     #sensor = py_qmc5883l.QMC5883L()
     #sensor.calibration = [[1.0114098955206197, -0.027113265665540898, -581.7816430010785], [-0.027113265665540842, 1.064429089093909, -3488.366725677899], [0.0, 0.0, 1.0]]
 except:
     compass_present = False
-    print ('QMC8553L compass not present')
+    print ('position: QMC8553L library not present')
        
 
     
@@ -124,7 +124,7 @@ def get_beacon(cap, sensitivity, active_angle, res_q):
         mask = cv2.inRange(hsv, lower_col, upper_col)
         
         # find the contours, will be returned in array contours
-        _, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+        contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
         
         # determine the area of the contour
         for contour in contours:
