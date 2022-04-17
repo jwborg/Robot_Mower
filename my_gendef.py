@@ -7,3 +7,7 @@
 p_x_sz = 500
 p_y_sz = 500
 cm_pix = 3                                      # scale_factor (cm per pixel)
+
+# drive mode
+auto_mode = 0
+manual_mode = 1

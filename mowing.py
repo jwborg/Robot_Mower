@@ -1,19 +1,76 @@
 #!/usr/bin/python3
 
+import sys
 import math
 import time
 import struct
-import datetime           # used by drv_mower
+import datetime           # used by spiral_pattern
+
+import numpy as np
+import cv2 as cv2
+from picamera import PiCamera
+import apriltag
 
 # application imports
+import global_vars as gv
 import my_queue as que
 import my_gendef as gnl
 import my_gpio 
 
-if my_gpio.Im_a_Raspberry:
+from dataclasses import dataclass 
+from typing import List, Tuple
+
+
+@dataclass
+class Point:            # Point (x,y) 
+    x: float            # X coordinate
+    y: float            # Y coordinate
+
+    def __init__(self, x, y) -> None:
+        self.x = x
+        self.y = y
+        
+@dataclass
+class Beacon:   
+    bcn_no: int         # the beacon number
+    a: float            # offset X axis
+    b: float            # offset Y axis
+    r: float            # radius
     
+@dataclass
+class BeaconIntersections:
+    bcn_a: int         # beacon A (lower beacon number than bcn_b)
+    bcn_b: int         # beacon B
+    is1: Point         # Intersection point 1 X and Y coordinates
+    is2: Point         # Intersection point 2 X and Y coordinates
+
+@dataclass
+class TriLateration:
+    b1: int            # beacon 1
+    b2: int            # beacon 2
+    b3: int            # beacon 3
+    isp1: Point        # Intersection point 1 X and Y coordinates
+    isp2: Point        # Intersection point 2 X and Y coordinates
+    isp3: Point        # Intersection point 3 X and Y coordinates
+    d123: float        # linear approximation of the intersection circumferance
+    centroid: Point    # centroid point of isp1, isp2, isp3 triangle
+
+    def __init__(self, b1, b2, b3, isp1, isp2, isp3, d123, centroid) -> None:
+        self.b1 = b1
+        self.b2 = b2
+        self.b3 = b3
+        self.isp1 = isp1
+        self.isp2 = isp2
+        self.isp3 = isp3        
+        self.d123 = d123
+        self.centroid = centroid
+
+
+try:
     # to access the input pin for the drive motor command feedback
     import RPi.GPIO as GPIO
+    my_gpio.Im_a_Raspberry = True
+    print ('mowing() import RPiGPIO ok')
     
     # setup the I2C bus 
     import smbus        # used by motor_cmd
@@ -29,186 +86,514 @@ if my_gpio.Im_a_Raspberry:
 
     # Give the I2C device time to settle
     time.sleep(2)
+    
+except:
+    my_gpio.Im_a_Raspberry = False
+    print ('mowing() RPiGPIO not found')
+    
+
 
 # only import the QMC5883L driver on raspberry; Windows 10 has no I2C bus
 try:
     import py_qmc5883l
     compass_present = True
-    print ('mowing: QMC8553L library passed')
+    print ('mowing() QMC8553L library passed')
     # set the compass calibration
     sensor = py_qmc5883l.QMC5883L()
     
-    # sensor calibration for chp 8553 7008 on 2020/08/07
-    sensor.calibration = [[1.0176504703722995, -0.02987973970930191, -137.34567137145933], [-0.029879739709301856, 1.0505821559575423, -2445.845227907534], [0.0, 0.0, 1.0]]
+    # sensor calibration for chp 8553 7008 on 2021/07/08 (installed on mower)
+    sensor.calibration = [[1.0936087442096625, 0.02757899075757958, 1449.4744790188254], [0.027578990757579636, 1.0081253171125029, 204.2978922886598], [0.0, 0.0, 1.0]]
     
 except:
     compass_present = False
-    print ('mowing: QMC8553L library not present')
+    print ('mowing() QMC8553L library not present')
     
-    
-
-    
-# global variables - shared outside this thread
-veh_pos_cm = (0,0)          # vehicle position (x,y) in cm
-
-- 0.
-# threads
-kill_thread_1 = False       # set by toggle_mower_thread()
-
-# global variables - not shared outside this thread
-mower_width = 53            # mower width in cm
-work_area_limits = []       # list of work area limits per segment;
-                            # (xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm)
-
-# mowing patterns
-mow_traditional = 1
-mow_spiral = 2
-mow_random = 3            
-
-
-
-
-
-# get the vehicle position by triangulation
-def get_veh_position():
-
-    steps_360 = 48 * 8                  # 48 steps with 8 micro steps per step
-    degree_step = 360.0 / steps_360     # based upon 48 * 8 microsteps per 360 degrees
-    rot_res_step = 1                    # resolution in steps
-    rot_res_deg = rot_res_step * degree_step  
-    
-    
-    # beacon bearings will be the list of beacon the vehicle can see and may change over the course
-    beacon_bearings = {}
-    all_intersections = {}
-    
-    # the vehicle is stopped, get it's absolute bearing
-    current_bearing = get_compass_bearing()
-    
-    # rotate the sensor for a full 360 degrees to get all beacons we can see
-    rel_bearing = 0
-    while(rel_bearing <= 360):
-    
-        # if the sensor acquired a beacon 
-        beacon_acquired = get_sensor(rel_bearing)
-        
-        # 0 if no beacon was acquired, else beacon bumber
-        if beacon_acquired > 0:
-            
-            # get the beacon number and bearing
-            abs_bearing = math.fmod(rel_bearing + current_bearing,360.0)
-            beacon_bearings[beacon_acquired] = abs_bearing
-            print ("get_veh_pos: bearing_acquired = ", beacon_acquired, "abs_bearing = ", abs_bearing)
-            
-        # rotate for the next acquistition attempt
-        rotate_sensor(rot_res_step, my_gpio.CW)
-        rel_bearing += rot_res_deg
-        
-        
-    # determine the best 2 beacons to use, try to get as close to a 90 degree angle bewteen them
-    for bcn1 in beacon_bearings:
-        for bcn2 in beacon_bearings:
-        
-            # don't store when same beacon or duplicate 
-            if bcn1 < bcn2:
-                # calculate the angle between the 2 bearings
-                brg_ang = math.fabs(get_bear_diff(beacon_bearings[bcn1], beacon_bearings[bcn2]))
-                
-                # quality 0 (90 degree angle)is best, quality 90 is worst
-                quality = math.fabs(brg_ang - 90.0)
-                
-                # and store the results so that the best 2 bearings can be picked later
-                all_intersections[(bcn1,bcn2)] = (bcn1, bcn2, brg_ang, quality)
-    
-    # pick the best 2 bearings
-    best_quality = 90.0
-    for bcn in all_intersections:
-
-        # unpack
-        (t_bcn1, t_bcn2, t_brg_ang, t_quality) = all_intersections[bcn]    
-        print ("get_veh_pos: brg = ", t_bcn1, t_bcn2, t_brg_ang, t_quality)
-
-        if t_quality < best_quality:
-            bcn1 = t_bcn1
-            bcn2 = t_bcn2
-            brg_ang = t_brg_ang
-            quality = t_quality
-            
-            # found a new best pair
-            best_quality = t_quality
-            
-    print ("get_veh_pos: using beacons = ", bcn1, beacon_bearings[bcn1], bcn2, beacon_bearings[bcn2])
-            
-    # calculate the position
-    veh_pos_cm_tri = update_position([beacon_bearings[bcn1], beacon_bearings[bcn2]])
-    
-    # rotate the sensor back to the starting position
-    rotate_sensor(steps_360, my_gpio.CCW)
-    
-    return(veh_pos_cm_tri)
-
-
-
-
-# once we have 2 bearings, calculate the position 
-def update_position(bearings):
-
-    # temporary beacon locations fore testing
-    beacon_pos_cm = [ (100,100), (200,1400), (1450,1450) ]
-    
-    
-    m = {}      # linear equation coefficient
-    b = {}      # linear equation offset
-    
-    # from the absolute bearing, calculate slope 'm' and offset 'b' from y = m.x + b
-    for bcn in range(0,2):
-    
-        # calculate the slope 'm'
-        m[bcn] = get_m(bearings[bcn])
-        
-        # calculate the offset 'b' from the fixed position of the beacon
-        (x,y) = beacon_pos_cm[bcn]
-        b[bcn] = y - (m[bcn] * x)
-    
-        print ('update_position: ', beacon_pos_cm[bcn], 'm = ', m[bcn], 'b =', b[bcn])
-
-    # calculate the intersection
-    (x, y) = intersect(m[0], b[0], m[1], b[1])  
-    print ('update_position: intersection = (', x, ',', y, ')')
-    return(x,y)
-
-
-
-  
-def get_bear_diff(bear1, bear2):
-    r = (bear2 - bear1) % 360.0
-    # Python modulus has same sign as divisor, which is positive here,
-    # so no need to consider negative case
-    if r >= 180.0:
-        r -= 360.0
-    return r
  
- 
-    
-  
-def get_m(bearing):
 
-    # adjust to 0-360
-    bearing = math.fmod(bearing, 360.0)
+# initialize the camera; it needs 2 seconds to start-up; calibrating the mirror will do that
+# the PiCamera library allows setting the camera up in advance resulting in faster images
+camera = PiCamera()
+frame_size = 1920                                # camera will correct; should be multiple of 32 (horizontal) and 16 vertical
+image_size = frame_size * frame_size
+camera.resolution = (frame_size, frame_size)     # capture a square as the image will rotate due to the mirror
+camera.framerate_range = (1,30)                  # allow from 1 fps to 30 fps for longer shutter speeds
+
+
+
+
+# return the distance to the april tag based upon the measured vertical rib of the tag
+def april_distance(v_rib: float) -> float:
+
+    # based upon 17.7 cm vertical rib apriltag
+    # the distance calculated from the vertical rib of the April tag is not linear.
+    # Calculated by Excel regression: dist = (v_rib / 45499)^(1/-0.958)
+    A = 45499.0
+    B = -1.04384
+    dist = (v_rib / A) ** B
+
+    return (dist)
     
-    # [ 0-180 ] 
-    if bearing <= 180:
-        m = math.tan(math.radians(90.0 - bearing))
-        return (m)
-    # < 180 - 360 ]
-    elif bearing <= 360:
-        m = math.tan(math.radians(270.0 - bearing))
-        return (m)
+
+
+
+
+# get the vehicle position 
+def get_veh_position(bcn_data : dict) -> Tuple[bool, TriLateration]:
+
+    trilat = TriLateration(0, 0, 0, Point(0.0, 0.0), Point(0.0, 0.0), Point(0.0, 0.0), 0.0, Point(0.0, 0.0))
+    best_trilat = TriLateration(0, 0, 0, Point(0.0, 0.0), Point(0.0, 0.0), Point(0.0, 0.0), 0.0, Point(0.0, 0.0))
+                                            
+    my_name = 'get_veh_position()'
+
+    view_angle = 36             # the camera view angle in degrees for the 8mm lens    
+    
+    # initialize
+    position_found = False
+    veh_pos_cm_tri = Point(0,0)
+    found_bcn_list = []     # found beacon list for this request
+    
+    # rotate the mirror in whole steps for 1 full rotation
+    step_incr = int(view_angle / 360 * my_gpio.cr_SPR)          # keep as an integer
+    no_steps = 0
+    rel_mirror_brng = 0 
+    while(no_steps < my_gpio.cr_SPR):
+        
+        # sleep to stabilize from vibrations
+        time.sleep(0.2)
+        
+        # capture single frame directy into opencv object
+        frame = np.empty((frame_size * frame_size * 3,), dtype=np.uint8)
+        camera.capture(frame, 'bgr')
+        frame = frame.reshape((frame_size, frame_size, 3))
+        
+        # save the settings
+        hhmmss = datetime.datetime.now().strftime("%I%M%S")
+        
+        # for debugging
+        #show_camera_settings(hhmmss)
+        #fn = ram_disk + hhmmss + 'img_col_' + str(rel_mirror_brng) + '.jpg'
+        #cv2.imwrite(fn, frame) 
+
+        # grab the dimensions of the image and calculate the center of the frame
+        (h, w) = frame.shape[:2]
+        (cX, cY) = (w // 2, h // 2)
+        
+        # the frame is rotated due to the mirror rotation, de-rotate it to face up
+        camera_orientation = -90             # camera points East in reality
+        corr_angle =  brng_add(rel_mirror_brng, camera_orientation) * -1
+        #print (f'{my_name}: corr_angle = {corr_angle}')
+        M = cv2.getRotationMatrix2D((cX, cY), corr_angle, 1.0)
+        frm_rotated = cv2.warpAffine(frame, M, (w, h))
+        
+        # flip the image around the y-axis due to the mirror effect
+        frm_flipped = cv2.flip(frm_rotated, 1)
+        
+        # save the rotated color image for evaluation
+        fn = gv.ram_disk + hhmmss + 'img_rot_' + str(rel_mirror_brng) +'.jpg'
+        cv2.imwrite(fn, frm_flipped) 
+        
+        # use a filter to blur the image and get rid of noise
+        # the filter size must be odd and a function of the resolution
+        frm_blur = cv2.GaussianBlur(frm_flipped, (9,9), 0)
+
+        # convert to HSV colors for easy color detection
+        frm_hsv =cv2.cvtColor(frm_blur, cv2.COLOR_BGR2HSV)
+
+        # tuned color for cyan which is not abundant in nature
+        # HSV - Hue Saturation Value 0-180, 0-255, 0-255.
+        lower_col = np.array([90, 50, 0])       # 90, 50, 0
+        upper_col = np.array([110,255,255])
+        mask = cv2.inRange(frm_hsv, lower_col, upper_col)
+        fn = gv.ram_disk + hhmmss + 'img_msk_' + str(rel_mirror_brng) +'.jpg'
+        cv2.imwrite(fn, mask)
+        
+        # define the AprilTags detector options and then detect the AprilTags in the input image
+        options = apriltag.DetectorOptions(families="tag25h9")
+        detector = apriltag.Detector(options)
+        results = detector.detect(mask)
+        
+        print(f'{my_name} total AprilTags detected {(len(results))}')
+        print(f'results = {results}')
+        
+        # there may be multiple apritags detected
+        for r in results:
+            
+            print(f'{my_name} tag_id = {r.tag_id}')
+            
+            # calculate the distance of the 2 vertical ribs of the 4 corners
+            (ptA, ptB, ptC, ptD) = r.corners
+            x1 = ptD[0] - ptA[0]
+            y1 = ptD[1] - ptA[1]
+            v1 = math.sqrt(x1*x1 + y1*y1)
+            
+            x2 = ptC[0] - ptB[0]
+            y2 = ptC[1] - ptB[1]
+            v2 = math.sqrt(x2*x2 + y2*y2)
+                    
+            # take the largest vertical rib
+            print(f'{my_name} v1= {v1} pixels v2= {v2} pixels')
+            v = max(v1, v2)
+            
+            #  calculate the distance based upon the vertical rib
+            distance = april_distance(v)
+            print(f'{my_name} distance = {distance} cm')
+        
+            # and add the apriltag number to the beacon table
+            found_bcn_list.append(r.tag_id)
+            bcn_data[r.tag_id].r = distance
+        
+        
+        # rotate the mirror
+        rotate_cam(step_incr, my_gpio.CW)
+        no_steps = no_steps + step_incr
+                
+        # calculate the angle 
+        rel_mirror_brng = int(no_steps / my_gpio.cr_SPR * 360.0)
+        #print (f'{my_name}: rotating no_steps = {no_steps} rel_mirror_brng = {rel_mirror_brng}')
+    
+    # full rotation is required, correct in case it was under 
+    step_makeup = my_gpio.cr_SPR  - (my_gpio.cr_SPR // step_incr) * step_incr # '//' is integer division
+    if step_makeup > 0:
+        #print (f'{my_name}: making up steps for full rotation = {step_makeup}')
+        rotate_cam(step_makeup, my_gpio.CW)
+    
+    # print debug data
+    print (f'{my_name}: found_bcn_list = {found_bcn_list}')
+    print (f'{my_name}: bcn_data = {bcn_data}')
+    
+    # find which beacons can be trilaterated
+    trilats = BcnTriLaterate(found_bcn_list, bcn_data)
+
+    if len(trilats) > 0:
+
+        position_found = True
+        print (f'{my_name} trilats = {trilats}')
+    
+        # now determine the best beacon
+        d123_min = sys.float_info.max
+        for trilat in trilats:
+            if trilat.d123 < d123_min:
+                d123_min = trilat.d123
+                best_trilat = trilat
+        
+    return(position_found, best_trilat)
+
+
+
+
+def TwoBeaconIntersection(c1: Beacon, c2: Beacon, i: BeaconIntersections) -> bool:
+
+    #
+    # http://www.ambrsoft.com/TrigoCalc/Circles2/circle2intersection/CircleCircleIntersection.htm
+    #
+    # Calculating intersection coordinates (x1, y1) and (x2, y2) of
+    # two circles of the form (x - c1.a)^2 + (y - c1.b)^2 = c1.r^2
+    #                         (x - c2.a)^2 + (y - c2.b)^2 = c2.r^2
+    #
+    # Return value:   true if the two circles intersect
+    #                 false if the two circles do not intersect
+    #
+      
+    my_name = 'TwoBeaconIntersection()'
+
+    # set up the bcn numbers, always lowest beacon_no in a
+    i.bcn_a = min(c1.bcn_no, c2.bcn_no)
+    i.bcn_b = max(c1.bcn_no, c2.bcn_no)
+
+    # Calculating distance between circles centers
+    D = math.sqrt((c1.a - c2.a) * (c1.a - c2.a) + (c1.b - c2.b) * (c1.b - c2.b))
+    
+    if ((c1.r + c2.r) >= D) & (D >= math.fabs(c1.r - c2.r)):
+        # Two circles intersects or tangent
+        # Area according to Heron's formula
+        #----------------------------------
+        a1 = D + c1.r + c2.r
+        a2 = D + c1.r - c2.r
+        a3 = D - c1.r + c2.r
+        a4 = -D + c1.r + c2.r
+        area = math.sqrt(a1 * a2 * a3 * a4) / 4.0
+        
+        # Calculating x axis intersection values
+        #---------------------------------------
+        val1 = (c1.a + c2.a) / 2.0 + (c2.a - c1.a) * (c1.r * c1.r - c2.r * c2.r) / (2.0 * D * D)
+        val2 = 2.0 * (c1.b - c2.b) * area / (D * D)
+        i.is1.x = val1 + val2
+        i.is2.x = val1 - val2
+        
+        # Calculating y axis intersection values
+        #---------------------------------------
+        val1 = (c1.b + c2.b) / 2.0 + (c2.b - c1.b) * (c1.r * c1.r - c2.r * c2.r) / (2.0 * D * D)
+        val2 = 2.0 * (c1.a - c2.a) * area / (D * D)
+        i.is1.y = val1 - val2
+        i.is2.y = val1 + val2
+        
+        # Intersection points are (x1, y1) and (x2, y2)
+        # Because for every x we have two values of y, and the same thing for y,
+        # we have to verify that the intersection points as chose are on the
+        # circle otherwise we have to swap between the points
+        test = math.fabs((i.is1.x - c1.a) * (i.is1.x - c1.a) + (i.is1.y - c1.b) * (i.is1.y - c1.b) - c1.r * c1.r)
+        if (test > 0.0000001):
+            # point is not on the circle, swap between y1 and y2
+            # the value of 0.0000001 is arbitrary chose, smaller values are also OK
+            # do not use the value 0 because of computer rounding problems
+            tmp = i.is1.y
+            i.is1.y = i.is2.y
+            i.is2.y = tmp
+
+        return (True)
+
+    else:
+        # circles are not intersecting each other
+        return (False)
+
+
+
+
+# function to calculate how close a point lies  to a beacon's measured radius 
+def DistanceToBeaconRadius(bcn : Beacon, p: Point) -> float:
+
+    my_name = 'DistanceToBeaconRadius()'
+    
+
+    point_distance_squared = (p.x - bcn.a)**2 +(p.y - bcn.b)**2
+    beacon_radius_squared = bcn.r**2
+
+    # check how close coordinate x, y is to the beacon radius
+    distance = math.sqrt(math.fabs(point_distance_squared - beacon_radius_squared))
+
+    print (f'{my_name} bcn = {bcn} p = {p} distance = {distance}')
+
+    return (distance)
+
+
+
+
+# of a set of 3 beacon numbers given 2 beacon numbers, return the third beacon number 
+def ThirdBeacon(bcn_no_1 : int, bcn_no_2 : int, bcn_no_a : int, bcn_no_b: int, bcn_no_c: int) -> int:
+
+    third : int         # the third beacon in the set of 3 beacons
+
+    beacons = [bcn_no_a, bcn_no_b, bcn_no_c]
+    beacons.remove(bcn_no_1)
+    beacons.remove(bcn_no_2)
+    third = beacons[0]
+
+    return(third)  
+    
+
+# from the beacons found, return the beacon sets that can be trilaterated
+def BcnTriLaterate (BeaconsDetected : List[int], Bcn : dict) -> List[TriLateration]:
+
+    my_name = 'BcnTriLaterate()'
+
+    # check which beacons intersect with each other
+    bcn_intersections : List[BeaconIntersections] = []
+    for index, bd in enumerate(BeaconsDetected):
+
+        # determine the next beacon to check intersection with
+        index_2 = index + 1
+        while index_2 < len(BeaconsDetected):
+            #print (f'{my_name} BeaconsDetected[index] = {BeaconsDetected[index]} BeaconsDetected[index_2] = {BeaconsDetected[index_2]}')
+
+            # intersect? 
+            isct = BeaconIntersections (0, 0, Point(0.0, 0.0), Point(0.0, 0.0))
+            b1 = Bcn[BeaconsDetected[index]]
+            b2 = Bcn[BeaconsDetected[index_2]]
+            if TwoBeaconIntersection(b1, b2, isct):
+
+                # yes, add to the list of beacon intersections
+                bcn_intersections.append(isct)
+
+            # point to the next detected beacon
+            index_2 += 1
+    
+    #print (f'{my_name} all beacon intersections = {bcn_intersections}')
+
+    # now look for intersections with a third beacon: b1-b2, b2-b?, B?-b1 
+    # note that 'bcn_intersections' always has the lower beacon number in bcn_a, higher in bcn_b
+    tri_lats : List[TriLateration] = []
+    for isct_1 in bcn_intersections:
+        #print (f'\n{my_name} isct_1 = {isct_1}')
+        
+
+        # look now for intersections of the second beacon  
+        for isct_2 in bcn_intersections:
+            if isct_1.bcn_b == isct_2.bcn_a:
+                #print (f'{my_name} isct_2 = {isct_2}')
+
+                # now look for the intersection between second and third beacon
+                for isct_3 in bcn_intersections:
+                    if isct_1.bcn_a == isct_3.bcn_a and isct_2.bcn_b == isct_3.bcn_b:
+                        #print (f'{my_name} isct_3 = {isct_3}')
+
+                        # create the TriLateration instance 
+                        tl = TriLateration(isct_1.bcn_a, isct_1.bcn_b, isct_3.bcn_b, Point(0.0, 0.0), Point(0.0, 0.0), Point(0.0, 0.0), 0.0, Point(0.0, 0.0))
+                        
+                        # isct_1: determine which of the 2 intersections are closest the third beacon
+                        other_bcn = ThirdBeacon(isct_1.bcn_a, isct_1.bcn_b, tl.b1, tl.b2, tl.b3)
+                        print (f'{my_name} isct_1.bcn_a = {isct_1.bcn_a}, isct_1.bcn_b = {isct_1.bcn_b} other_bcn = {other_bcn}')
+                        dist_1 = DistanceToBeaconRadius(Bcn[other_bcn], isct_1.is1)
+                        dist_2 = DistanceToBeaconRadius(Bcn[other_bcn], isct_1.is2)
+                        if dist_1 < dist_2:
+                            tl.isp1.x = isct_1.is1.x
+                            tl.isp1.y = isct_1.is1.y
+                        else:
+                            tl.isp1.x = isct_1.is2.x
+                            tl.isp1.y = isct_1.is2.y
+
+                        # isct_2: determine which of the 2 intersections are closest to the third beacon
+                        other_bcn = ThirdBeacon(isct_2.bcn_a, isct_2.bcn_b, tl.b1, tl.b2, tl.b3)
+                        print (f'{my_name} isct_2.bcn_a = {isct_2.bcn_a}, isct_2.bcn_b = {isct_2.bcn_b} other_bcn = {other_bcn}')
+                        dist_1 = DistanceToBeaconRadius(Bcn[other_bcn], isct_2.is1)
+                        dist_2 = DistanceToBeaconRadius(Bcn[other_bcn], isct_2.is2)
+                        if dist_1 < dist_2:
+                            tl.isp2.x = isct_2.is1.x
+                            tl.isp2.y = isct_2.is1.y
+                        else:
+                            tl.isp2.x = isct_2.is2.x
+                            tl.isp2.y = isct_2.is2.y
+                        
+                        # isct_3: determine which of the 2 intersections are closest to the third beacon
+                        other_bcn = ThirdBeacon(isct_3.bcn_a, isct_3.bcn_b, tl.b1, tl.b2, tl.b3)
+                        print (f'{my_name} isct_3.bcn_a = {isct_3.bcn_a}, isct_3.bcn_b = {isct_3.bcn_b} other_bcn = {other_bcn}')
+                        dist_1 = DistanceToBeaconRadius(Bcn[other_bcn], isct_3.is1)
+                        dist_2 = DistanceToBeaconRadius(Bcn[other_bcn], isct_3.is2)
+                        if dist_1 < dist_2:
+                            tl.isp3.x = isct_3.is1.x
+                            tl.isp3.y = isct_3.is1.y
+                        else:
+                            tl.isp3.x = isct_3.is2.x
+                            tl.isp3.y = isct_3.is2.y
+
+                        # calculate a linear approximation of the circumferance of the 3 point intersection
+                        side_a = math.sqrt((tl.isp1.x-tl.isp2.x)**2 + (tl.isp1.y-tl.isp2.y)**2)
+                        side_b = math.sqrt((tl.isp2.x-tl.isp3.x)**2 + (tl.isp2.y-tl.isp3.y)**2)
+                        side_c = math.sqrt((tl.isp1.x-tl.isp3.x)**2 + (tl.isp1.y-tl.isp3.y)**2)
+                        tl.d123 = side_a + side_b + side_c
+
+                        # calculate the centroid point (center of gravity)
+                        tl.centroid.x = (tl.isp1.x + tl.isp2.x + tl.isp3.x)/3
+                        tl.centroid.y = (tl.isp1.y + tl.isp2.y + tl.isp3.y)/3  
+
+                        tri_lats.append(tl)
+                        break      
+    
+    return(tri_lats)
+
+
+
+
+
+# are 2 numbers equal within given delta?
+# warning: floating point calculations are not exact, i.e. 2.5 - 2.6 = 0.10000000000000009
+def equal_delta(a: float, b: float , delta: float) -> bool:
+
+    return np.abs(a - b) <= delta   
+
+
+def show_camera_settings(hhmmss: str):
+    
+    my_name = 'show_camera_settings()'
+    filename = gv.ram_disk + hhmmss + '_settings' + '.txt'
+    try:
+        with open(filename, 'w') as f:
+                
+            f.write (f'camera.resolution = {camera.resolution}\n')
+            
+            f.write (f'camera.exposure_mode = {camera.exposure_mode}\n')
+            f.write (f'camera.meter_mode = {camera.meter_mode}\n')
+            f.write (f'camera.awb_mode = {camera.awb_mode}\n')
+            f.write (f'camera.sensor_mode = {camera.sensor_mode}\n\n')
+         
+            f.write (f'camera.iso = {camera.iso}\n')
+            f.write (f'camera.exposure_speed = {camera.exposure_speed}\n')
+            f.write (f'camera.shutter_speed = {camera.shutter_speed}\n')
+            f.write (f'camera.framerate = {camera.framerate}\n\n')
+           
+            f.write (f'camera.analog_gain = {camera.analog_gain}\n')
+            f.write (f'camera.digital_gain = {camera.digital_gain}\n')
+            f.write (f'camera.awb_gains = {camera.awb_gains}\n\n')
+        
+            f.write (f'camera.brightness = {camera.brightness}\n')
+            f.write (f'camera.contrast = {camera.contrast}\n')
+            f.write (f'camera.saturation = {camera.saturation}\n')
+            f.write (f'camera.sharpness = {camera.sharpness}\n\n')
+            
+            f.write (f'camera.drc_strength = {camera.drc_strength}\n')
+            f.write (f'camera.exposure_compensation = {camera.exposure_compensation}\n')
+            f.write (f'camera.framerate_range = {camera.framerate_range}\n')
+            f.write (f'camera.image_effect = {camera.image_effect}\n')
+            f.close()
+    except:
+        print (f'{my_name} Could not create file {filename}')
+    
+    return()
+    
+
+
+    
+# rotate the camera by the requested number of steps (positive or negative) 
+def rotate_cam(no_steps: int, direction: bool):
+
+    my_name = 'rotate_cam()'
+
+    # as the mirror motor is mounted upside down, invert the rotation direction
+    rot_direction = not direction
+    
+    # delay in seconds for 200 step stepping motor, any faster will loose steps
+    delay = 0.005
+
+    if my_gpio.Im_a_Raspberry:
+        
+        # set the direction
+        GPIO.output(my_gpio.cr_DIR_PIN, rot_direction)
+        
+        # and rotate for the requested number of steps
+        for x in range(no_steps):
+            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.HIGH)
+            time.sleep(delay)
+            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.LOW)
+            time.sleep(delay)
+    
+    return()
+
+
+
+# rotate the mirror until the calibration point is reached 
+def calibrate_mirror() -> bool:
+
+    my_name = 'calibrate_mirror()'
+    
+    calibrated = False
+    direction  = my_gpio.CW
+    step_incr  = 1
+    step_count = 0
+        
+    if my_gpio.Im_a_Raspberry:
+        
+        # set the direction
+        GPIO.output(my_gpio.cr_DIR_PIN, my_gpio.CCW)
+        
+        # and rotate until the calibration point is found or a full rotation has completed
+        while not (calibrated or step_count > my_gpio.cr_SPR):
+            
+            rotate_cam(step_incr, direction)
+            step_count = step_count + step_incr
+            #print (f'{my_name}: step_count = {step_count}')
+            
+            # and check if the calibration point has been found
+            calibrated = not GPIO.input(my_gpio.mirror_prox_pin)
+        
+    return(calibrated)
+
+
     
         
     
 # calculate the intersection of 2 linear equations
-def intersect(m1, b1, m2, b2):
+def intersect(m1: float, b1: float, m2: float, b2: float) ->Tuple[float, float]:
+
+    my_name = 'intersect()'
 
     # m1 * x + b1 = m2 * x + b2
     # (m1 - m2)* x = b2 - b1
@@ -217,70 +602,68 @@ def intersect(m1, b1, m2, b2):
     
     # and from the y coordinate, calculate the y coordinate from one of the two lines
     y = m1 * x + b1
-    print ('intersect: x =', x, 'y = ', y)
+    print (f'{my_name}: x = {x} y =  {y}')
     return (x,y)
-    
-  
-
-# check if the sensor acquired a beacon
-def get_sensor(brg):
-
-    sensor = 0
-    
-    if (brg > 20.0 and brg <21.0):
-        sensor = 1
-        
-    if (brg > 220.0 and brg <221.0):
-        sensor = 2
-    
-    if (brg > 340.0 and brg <341.0):
-        sensor = 3
-    
-    return(sensor)
 
 
- 
-# rotate the camera by the requested number of steps (positive or negative) 
-def rotate_sensor(no_steps, direction):
-
-    # delay in seconds for 48 step stepping motor
-    delay = .0208 / 8
-
-    if my_gpio.Im_a_Raspberry:
-        # set the direction
-        GPIO.output(my_gpio.cr_DIR_PIN, direction)
-        
-        # and rotate for the requestde number of steps
-        for x in range(no_steps):
-            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.HIGH)
-            time.sleep(delay)
-            GPIO.output(my_gpio.cr_STEP_PIN, GPIO.LOW)
-            time.sleep(delay)
-    
-    return()        
-        
                 
 
 # get the compass bearing from the QMC5883L compass
-def get_compass_bearing():
+def get_compass_bearing() -> float:
+    
+    my_name = 'get_compass_bearing()'
 
+    # returns the True compass bearing, compansated by magnetic declination 
+    # magnetic decination in Glastone QLD is 12.2 degrees East
+    magn_decl = 12.2
+    
     if compass_present:
-        b = sensor.get_bearing()
+        b0 = sensor.get_bearing()
+        time.sleep(0.1)
+        b1 = sensor.get_bearing()
+        time.sleep(0.1)
+        b2 = sensor.get_bearing()
+        
+        # calculate the average bearing
+        b = brng_avg(b0, b1, b2)
+        
+        # north and south are flipped, also magnetic declination, correct
+        b = brng_add(b, 180.0 + magn_decl)
+        
+        # round, 1 decimals
+        b = round(b, 1)
     else:
         b = 0.0
+        
     return (b)
 
 
 
+# add two bearings
+def brng_add(bearing_1: float, bearing_2: float) -> float:
+    sum = (bearing_1 + bearing_2) % 360.0
+    return (sum)
+    
 
-def get_bear_diff(bearing_1, bearing_2):
+# subtract two bearings
+def brng_diff(bearing_1: float, bearing_2: float) -> float:
+
     r = (bearing_2 - bearing_1) % 360.0
     # Python modulus has same sign as divisor, which is positive here,
     # so no need to consider negative case
     if r >= 180.0:
         r -= 360.0
-    return r
- 
+    return (r)
+
+
+
+# calculate the average of 3 bearings
+def brng_avg(b0: float, b1: float , b2: float) -> float:
+
+    # around the 360 mark, it is tricky. This give ok results over the full range
+    b = (brng_diff(360.0,b0) + brng_diff(360.0,b1) + brng_diff(360.0,b2)) /3.0
+    b = brng_add(360.0, b)
+    return(b)
  
  
     
@@ -293,7 +676,7 @@ def wait_cmd_done():
     # wait until status indicates completed
     cmd_finished = GPIO.input(my_gpio.cr_DRV_PIN)
     while not cmd_finished:
-        #print ('wait_cmd_done: loop cmd_finished = ', cmd_finished)
+        #print (f'{my_name} loop cmd_finished = {cmd_finished}')
         time.sleep(0.5)
         cmd_finished = GPIO.input(my_gpio.cr_DRV_PIN)
 
@@ -302,50 +685,74 @@ def wait_cmd_done():
 
 
 # turn to the requested bearing and drive
-def turn_drive(req_bearing, dist_cm):
+def turn_drive(req_bearing: float, dist_cm: float, mode: int) -> float:
 
-    # motor reduction = 60:1, sprockets 1:1, wheel diameter 20 cm
-    # 1 step (revolution) = 62.83/60 = 10.47 cm
-    steps_cm   = 0.0955         # steps per cm
+    # mode - manual_mode 
+    #      - auto_mode
+
+    my_name = 'turn_drive()'
+
+    # motor reduction = 60:1, sprockets 1:1, wheel diameter 25 cm
+    # 1 step (revolution) = 78.53/60 = 1.0309 cm
+    steps_cm   = 0.764         # wheel: steps per cm
     
     # get the absolute bearing the mower is pointing to
-    #current_bearing = 0        # fixed angle for now
-    time.sleep(1)
     current_bearing = get_compass_bearing()
-    print ('turn_drive: current_bearing = ', current_bearing)
-       
-       
-       
-    # calculate the angle to turn
-    turn_angle = get_bear_diff(current_bearing, req_bearing)
+    print (f'{my_name}: current_bearing = {current_bearing} req_bearing {req_bearing}')
     
-    # calculate the distance the wheels need to travel
-    turn_cm = turn_angle  / 360.0 * math.pi * mower_width
-    turn_steps = int(turn_cm * steps_cm)
+    # in manual mode, the mower is operated from the hmi directly and req_bearing is the requested turn angle
+    # either positive or negative (counter clockwise)
+    if mode == gnl.manual_mode:
+        # calculate the requested bearing
+        req_bearing = brng_add(current_bearing,req_bearing)
+       
+    # correct if necessary to make sure we are going in the right direction; with
+    # a turning circumferance of 153.9cm, 1 degree will be 0.427 cm.  1 step will be 2.3 degrees. 
+    # do not correct any less than 3 degrees. 
+    cnt = 0
+    while not equal_delta(current_bearing, req_bearing, 3.0):
+    
+        # only try a few times
+        cnt += 1
+        
+        # calculate the angle to turn
+        turn_angle = brng_diff(current_bearing, req_bearing)
+        print (f'{my_name}: cnt = {cnt} current_bearing {current_bearing} req_bearing {req_bearing} turn_angle = {turn_angle}')
+        
+        # calculate the distance the wheels need to travel
+        turn_cm = turn_angle  / 360.0 * math.pi * gv.mower_width
+        turn_steps = int(turn_cm * steps_cm)
+        
+        # zero turn at 50% duty
+        if my_gpio.Im_a_Raspberry:
+            mower_cmd('z,' + str(turn_steps) + ',0,50')
+            wait_cmd_done()
+    
+        # check if we are close
+        current_bearing = get_compass_bearing()
+    
+        if cnt > 10:
+            print (f'{my_name}: current_bearing = {current_bearing} unable to reach req_bearing = {req_bearing}')
+            exit()
+            break
     
     # calculate the steps to drive
     drive_steps = int(dist_cm * steps_cm)
-    
-    
+
+    # drive at 80% duty    
     if my_gpio.Im_a_Raspberry:
-        
-        # zero turn
-        mower_cmd('z,' + str(turn_steps) + ',0,50')
-        wait_cmd_done()
-        
-        # drive
         mower_cmd('d,' + str(drive_steps) + ',0,80')
         wait_cmd_done()
-        
-
-    else:
-        print ('turn_drive: turn_angle = ', turn_angle, 'steps = ', steps)
            
-    return
+    return (current_bearing)
+ 
+
+
+ 
     
 
 # send command to Arduino based motor driver
-def mower_cmd(command):
+def mower_cmd(command: str) -> bytes:
 
 # Raspberry Pi I2C Master to Arduino Slave
 # Test sending command to Arduino over I2C bus
@@ -363,6 +770,8 @@ def mower_cmd(command):
 #   19,20       Show        R       Signed Int  Motor 0 count
 #   21,22       Show        R       Signed Int  Motor 1 count
 
+    my_name = 'mower_cmd()'
+
     # Arduino Motor driver registers
     reg_cmd       = 0            # 1 bytes, used by drive command
     reg_drive     = 1            # 6 bytes, used by drive command
@@ -372,7 +781,7 @@ def mower_cmd(command):
 
     data = ''
     
-    print ("motor_cmd: ", command)
+    print (f'{my_name} command = {command}')
 
 
     # drive command: d,<steps>,<steer_delta>,<duty>
@@ -393,7 +802,7 @@ def mower_cmd(command):
 
                 duty = int(cmd_ln[3])
                 struct.pack_into('<h', b_reg_drive, 4, duty)               # short integer 2 bytes
-                print (b_reg_drive)
+                print (f'{my_name} b_reg_drive')
 
                 # convert to list
                 l_reg_drive = list(b_reg_drive)
@@ -424,7 +833,7 @@ def mower_cmd(command):
 
                 duty = int(cmd_ln[3])
                 struct.pack_into('<h', b_reg_drive, 4, duty)               # short integer 2 bytes
-                print (b_reg_drive)
+                print (f'{my_name} b_reg_drive')
                 
                 print ("  z command", steps)
                 # convert to list
@@ -447,7 +856,7 @@ def mower_cmd(command):
         # convert from list to bytearray
         b_reg_cmd = bytearray(l_reg_cmd)
         data = struct.unpack('<B', b_reg_cmd)    # unsigned int 1 byte
-        print ("cmd data = ", data)
+        print (f'{my_name} cmd data = {data}')
         
 
     # tune command: t,<Kp>,<Ki>,<Kd>
@@ -468,7 +877,7 @@ def mower_cmd(command):
 
                 kd = float(cmd_ln[3])
                 struct.pack_into('<f', b_reg_tune, 8, kd)            # float, 4 bytes
-                print (b_reg_tune)
+                print (f'{my_name} b_reg_tune = {b_reg_tune}')
 
                 # convert to list
                 l_reg_tune = list(b_reg_tune)
@@ -491,7 +900,7 @@ def mower_cmd(command):
         # convert from list to bytearray
         b_reg_tune = bytearray(l_reg_tune)
         data = struct.unpack('<fff', b_reg_tune)    # float, 3 x 4 bytes
-        print ("tuning data = ", data)
+        print (f'{my_name} tuning data =  {data}')
         
         # let i2c bus recover
         time.sleep(0.1)
@@ -502,7 +911,7 @@ def mower_cmd(command):
         # convert from list to bytearray
         b_reg_motor = bytearray(l_reg_motor)
         data = struct.unpack('<hh', b_reg_motor)    # short integer
-        print ("motor_data = ", data)
+        print (f'{my_name} motor_data =  {data}')
                 
                 
     # real all registers command: r
@@ -510,7 +919,7 @@ def mower_cmd(command):
     
         # read the entire register back from the Arduino
         data = bus.read_i2c_block_data(ARD_ADDR, reg_cmd, reg_next)
-        print("all registers = ", data)
+        print (f'{my_name} all registers =  {data}')
          
     # quit
     elif command == 'q':
@@ -523,7 +932,9 @@ def mower_cmd(command):
 # the work area is given in coordinates in cm. Now calculate the coordinates that
 # the centre mower should adhere to due to it's width and the linear equations of each of the segments 
 # of the work area
-def calc_work_path(work_area_coord_cm):
+def calc_work_path(work_area_coord_cm: List) -> List:
+
+    my_name = 'calc_work_path()'
 
     work_path = []          # the work path
     
@@ -541,7 +952,7 @@ def calc_work_path(work_area_coord_cm):
         if not first_coord == None:
         
             # determine the linear equation of this segment
-            (m, b_in, mid_coord) = get_lin_eq_segment(last_coord, coord, mower_width/2.0)
+            (m, b_in, mid_coord) = get_lin_eq_segment(last_coord, coord, gv.mower_width/2.0)
             
             # store only the inner boundary and the mid coordinate, which we  need only in case of a vertical segment
             segments_0.append((m, b_in, mid_coord))
@@ -553,12 +964,12 @@ def calc_work_path(work_area_coord_cm):
         last_coord = coord
         
     # now create the last segment by connecting to the first coordinates
-    (m, b_in, mid_coord) = get_lin_eq_segment(last_coord, first_coord, mower_width/2.0)
+    (m, b_in, mid_coord) = get_lin_eq_segment(last_coord, first_coord, gv.mower_width/2.0)
     
     # store only the inner boundary
     segments_0.append((m, b_in, mid_coord))        
      
-    #print ('calc_work_path: segments_0 = ', segments_0)
+    #print (f'{my_name} segments_0 = {segments_0}')
     
     
     
@@ -589,7 +1000,7 @@ def calc_work_path(work_area_coord_cm):
     (x,y) = calc_segment_cross(last_segment, first_segment)
     segments_1.append((x, y, m, b_in))
     
-    #print ('calc_work_path: segments_1 = ', segments_1)
+    #print (f'{my_name} segments_1 = {segments_1}')
    
    
    
@@ -608,12 +1019,12 @@ def calc_work_path(work_area_coord_cm):
             (xe, ye, _, _) = segments_1[index + 1]       # all other segments use the start coord of the next segment
 
         # calculate the absolute bearing and distance in cm to travel
-        (abs_brng, trvl_dist_cm) = get_brng(xs, ys, xe, ye)
+        (abs_brng, trvl_dist_cm) = calc_course(xs, ys, xe, ye)
         
         # now build the final work area data list
         work_path.append((xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm))
     
-    #print ('calc_work_path: work_path = ', work_path)
+    #print (f'{my_name}: work_path = {work_path}')
     return (work_path)
 
     
@@ -624,6 +1035,8 @@ def calc_work_path(work_area_coord_cm):
 # this funtion assumes a clockwise direction of the mower to determine the offset. Note that the mower
 # width can be set to 0. Then also return the coordinate of the mid point.
 def get_lin_eq_segment (x1y1, x2y2, offset):
+
+    my_name = 'get_lin_eq_segment()'
 
     # unpack
     (x1, y1) = x1y1
@@ -679,6 +1092,8 @@ def get_lin_eq_segment (x1y1, x2y2, offset):
 # calculate the coordinate where 2 segments (y = mx + b) intersect 
 def calc_segment_cross(seg1, seg2):
 
+    my_name = 'calc_segment_cross()'
+
     # unpack
     (m1, b1, mid_coord_1) = seg1
     (m2, b2, mid_coord_2) = seg2
@@ -708,8 +1123,10 @@ def calc_segment_cross(seg1, seg2):
 
 
 
-# get the absolute bearing starting at coordinate (xs,ys) and  ending at (xe,ye) and the distance between
-def get_brng(xs, ys, xe, ye):
+# get the absolute bearing starting at coordinate (xs,ys) and ending at (xe,ye) and the distance between
+def calc_course(xs, ys, xe, ye) -> Tuple[float, float]:
+
+    my_name = 'calc_course()'
 
     # initialize as floats
     brg = -1.0
@@ -718,7 +1135,7 @@ def get_brng(xs, ys, xe, ye):
     # calculate the deltas
     dx = xe - xs
     dy = ye - ys
-    #print ('dx = ', dx, 'dy = ', dy)
+    #print (f'{my_name} dx = {dx} dy = {dy}')
     
     if (math.fabs(dy) < 0.01):
         
@@ -768,14 +1185,14 @@ def get_brng(xs, ys, xe, ye):
 
 
 # check if value is within range [lim1, lim2], limits included    
-def in_range(val, lim1, lim2):
+def in_range(val: float, lim1: float, lim2: float) -> bool:
 
     if lim1 > lim2:
         tmp = lim2
         lim2 = lim1
         lim1 = tmp
         
-    inrange = (val >= lim1) and (val <= lim2)
+    inrange: bool = (val >= lim1) and (val <= lim2)
     
     return (inrange)
 
@@ -783,7 +1200,10 @@ def in_range(val, lim1, lim2):
 
 
 def traditional_pattern(work_area_limits, res_q):
-    print ('traditional_pattern: not implemented yet')
+
+    my_name = 'traditional_pattern()'
+
+    print (f'{my_name}: not implemented yet')
     
     return()
     
@@ -791,18 +1211,45 @@ def traditional_pattern(work_area_limits, res_q):
 
 def spiral_pattern(work_area_limits, res_q):
     
+    my_name = 'spiral_pattern()'
+    
     global veh_pos_cm
 
+
+    
     circumf = 0
     last_circumf = float('inf')          # initialize at largest possible int
     total_distance = 0.0                 # distance traveled
     
-    # announce spiral patter has started
+    # announce spiral pattern has started
     msg = "Spiral pattern started at " + str(datetime.datetime.now())
     que.push_queue(res_q, que.t_message, msg)
+
+    # set up the beacon data dictionary from global variable beacon positions collected in the main
+    bcn : Beacon
+    bcn_data = {}
+    for bp in gv.beacon_pos:
+        #unpack
+        b_no, b_x, b_y = bp
+
+        # build the dictionary
+        bcn_data[b_no] = Beacon (bcn_no = b_no,  a = b_x,   b = b_y, r = 0.0)
+    print (f'{my_name}: bcn_data = {bcn_data}')
+
+
+    # get the vehicle position, note that the vehicle bearing is not known yet
+    (xs,ys,veh_brng) = gv.veh_pos_cm
     
-    #print ('spiral_pattern: work_area_limits = ', work_area_limits)
-    #print ('spiral_pattern: veh_pos_cm = ', veh_pos_cm)
+    # get the current vehicle bearing
+    veh_brng = get_compass_bearing()
+    print (f'{my_name}: veh_brng {veh_brng}')
+    
+    # send the updated vehicle position to the hmi
+    gv.veh_pos_cm = (xs,ys,veh_brng)
+    que.push_queue(res_q, que.t_vehicle_position, gv.veh_pos_cm)
+    
+    print (f'{my_name}: work_area_limits = {work_area_limits}')
+    print (f'{my_name}: gv.veh_pos_cm = {gv.veh_pos_cm}')
     
     # calculate the circumference of the work area
     for seg in work_area_limits:
@@ -817,48 +1264,66 @@ def spiral_pattern(work_area_limits, res_q):
         new_path = []
         for seg in work_area_limits:
             (xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm) = seg
-            #print ('\n\nspiral_pattern: seg', seg)           
+            print (f'\n\n{my_name}: seg {seg}')           
                 
             # prepare the path for the next interation
             new_path.append((xs,ys))
 
+            # get the current vehicle position
+            (x_veh, y_veh, veh_brng) = gv.veh_pos_cm
+            print (f'{my_name}: This should be my position - gv.veh_pos_cm = {gv.veh_pos_cm}')
+            
             # check the current position by triangulation
-            veh_pos_cm_tri = get_veh_position()
+            position_found, tri_lat = get_veh_position(bcn_data)
+            
+            # update the hmi if no position found
+            if position_found: 
+                (x_veh, y_veh) = tri_lat.centroid.x, tri_lat.centroid.y 
+                veh_pos_cm_upd = (x_veh, y_veh, veh_brng)
+                print (f'{my_name}: Position calculated by triangulation: veh_pos_cm_upd {veh_pos_cm_upd}')
+                msg = "Position calculated by triangulation: " + str(x_veh) + ' ' + str(y_veh) + ' bearing ' + str(veh_brng) + ' ' + str(datetime.datetime.now())
+                que.push_queue(res_q, que.t_message, msg)
+            else:
+                print (f'{my_name}: No beacons detected')
+                msg = "No beacons detected " + str(datetime.datetime.now())
+                que.push_queue(res_q, que.t_message, msg)
             
             # check if we need to drive to the start postion
-            (x_veh, y_veh) = veh_pos_cm
             if (x_veh != xs) or (y_veh != ys):
 
-
                 # get bearing and distance to (xs, ys) from where we are
-                (start_brng, start_dist_cm) = get_brng(x_veh, y_veh, xs, ys)
+                (start_brng, start_dist_cm) = calc_course(x_veh, y_veh, xs, ys)
                 
                 # zero turn and drive to the start position
-                print ('spiral_pattern: start position - zero turning to bearing', start_brng)
-                turn_drive(start_brng, start_dist_cm)
+                print (f'{my_name}: Moving to start position - bearing {start_brng} distance {start_dist_cm} --- {x_veh} {y_veh} to {xs} {ys}')
+                veh_brng = turn_drive(start_brng, start_dist_cm, gnl.auto_mode)
                 total_distance += start_dist_cm
                 
-                # send the vehicle position to the hmi 
-                veh_pos_cm = (xs,ys)
-                que.push_queue(res_q, que.t_vehicle_position, veh_pos_cm)
+            # send the vehicle position to the hmi 
+            gv.veh_pos_cm = (xs,ys,veh_brng)
+            que.push_queue(res_q, que.t_vehicle_position, gv.veh_pos_cm)
+            print (f'{my_name}: now at position {gv.veh_pos_cm}')
+                
                 
             # zero turn to the required bearing to xe, ye
-            print ('spiral_pattern: zero turning to bearing', abs_brng)
+            print (f'{my_name}: zero turning to abs bearing {abs_brng}')
 
             # mow the segment (xs,ys) to (xe,ye) 
-            print ('spiral_pattern: mowing to ', xs, ys)
-            turn_drive(abs_brng, trvl_dist_cm)
+            print (f'{my_name}: Now mowing to {xe}, {ye}')
+            veh_brng = turn_drive(abs_brng, trvl_dist_cm, gnl.auto_mode)
             total_distance += trvl_dist_cm
             
             # send the vehicle position to the hmi 
-            veh_pos_cm = (xe,ye)
-            que.push_queue(res_q, que.t_vehicle_position, veh_pos_cm)
+            gv.veh_pos_cm = (xe,ye, veh_brng)
+            que.push_queue(res_q, que.t_vehicle_position, gv.veh_pos_cm)
+            
+            print (f'{my_name}: now at position {gv.veh_pos_cm}')
             
         # save the circumference
         last_circumf = circumf
         
         # calculate the new work area limits
-        #print ('new_path = ', new_path)
+        #print (f'{my_name} new_path = {new_path}')
         work_area_limits = []
         work_area_limits = calc_work_path(new_path)   
         
@@ -870,7 +1335,7 @@ def spiral_pattern(work_area_limits, res_q):
         
         # calculate the change in circumference
         delta_circumf = last_circumf - circumf
-        print ('spiral_pattern: circumf: ', circumf, delta_circumf)
+        print (f'{my_name}: circumf:  {circumf}  {delta_circumf}')
  
     # announce spiral pattern has completed
     msg = "Spiral pattern completed at " + str(datetime.datetime.now())
@@ -883,63 +1348,10 @@ def spiral_pattern(work_area_limits, res_q):
      
     
 def random_pattern(work_area_limits, res_q):
-    
-    global veh_pos_cm
-    
-    print ('random_pattern')
-    
-    # mow the outline, clockwise     
-    for seg in work_area_limits:
-        (xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm) = seg
-        print ('random_pattern: seg: ', seg)           
-            
-        # check if we need to drive to the start postion
-        (x_veh, y_veh) = veh_pos_cm
-        if (x_veh != xs) or (y_veh != ys):
-        
-            # drive to the start position (xs,ys)
-            veh_pos_cm = (xs,ys)
-            print ('random_pattern: driving to ', veh_pos_cm)
-            
-            # send the vehicle position to the hmi 
-            que.push_queue(res_q, que.t_vehicle_position, veh_pos_cm)
-            time.sleep(2)
-            
-            
-        # zero turn to the required bearing
-        print ('random_pattern: zero turning to bearing', abs_brng)
-        
-        # mow the segment (xs,ys) to (xe,ye)
-        veh_pos_cm = (xe,ye)
-        print ('random_pattern: mowing to ', veh_pos_cm)
-        
-        # send the vehicle position to the hmi 
-        que.push_queue(res_q, que.t_vehicle_position, veh_pos_cm)
-        time.sleep(2)
-        
-    # get the extremes to determine the approximate centre of the work area
-    x_min = int(gnl.p_x_sz * gnl.cm_pix)
-    x_max = 0
-    y_min = int(gnl.p_y_sz * gnl.cm_pix)
-    y_max = 0
-    for seg in work_area_limits:
-            (xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm) = seg
-            
-            # the extreme minimum
-            x_min = min(xs, xe, x_min)
-            y_min = min(ys, ye, y_min)
-            
-            # the extreme maximum
-            x_max = max(xs, xe, x_max)
-            y_max = max(ys, ye, y_max)
-    
-    # determine the approximate centre of the poly surface from it's extremes
-    xc = int((x_max - x_min) / 2.0 + x_min)
-    yc = int((y_max - y_min) / 2.0 + y_min)
-    print ('random_pattern: centre = (', xc, ',', yc,')')
-    
-    # turn towards the centre with a random error
-    
+
+    my_name = 'random_pattern()'
+
+    print (f'{my_name}: not implemented yet')
     
     return()
 
@@ -955,59 +1367,96 @@ def mowing(cmd_q, res_q):
     global veh_pos_cm                   # the vehicle position in cm
     global veh_pos_tri_cm               # the vehicle position as determined by triangulation
     global mowing_pattern               # the mowing pattern requested
-    global work_area_coord_cm           # the work area coordinates in cm    
+    global work_area_coord_cm           # the work area coordinates in cm
+    global beacon_pos_cm                # the beacon positions    
     global bus                          # I2C bus
+    global signal_mowing                # signal to stop mowing pattern
     
-    work_area_cm = []
+    my_name = 'mowing()'
+    
+    work_area_limits = []       # list of work area limits per segment;
+                                # (xs, ys, m, b, xe, ye, abs_brng, trvl_dist_cm)
+
+    
+    # rotate the mirror clock-wise until the calibration point is found
+    calibrated = calibrate_mirror()
+    if not calibrated:
+        print (f'{my_name}: mirror calibration point not found after 1 full rotation')
+        GPIO.cleanup()
+        exit(0)
+    else:
         
+        # calibration point was found, now rotate the mirror to face front
+        # the number of steps to rotate is determined by the physical contruction
+        rotate_cam(200, my_gpio.CCW)                
+        print (f'{my_name}: zero point reached')
+        
+            
     while True:
-        
-        print ('\n\nmowing: kill_thread_1 = ', kill_thread_1)
                                
         # get any commands from the hmi
         pkgs = que.get_queue(cmd_q)
+        print (f'{my_name} mower thread pkgs received= {pkgs} gv.kill_thread_1 = {gv.kill_thread_1}')
 
         for pkg in pkgs:
         
-            print ('mowing: pkg received', pkg)
+            print (f'{my_name}: pkg received {pkg}')
             
-            (pkg_time, type, data) = pkg
+            (pkg_time, ptype, data) = pkg
             now = time.time()
             if now - pkg_time < que.expire_threshold:
         
-                # start mowing command from hmi
-                if type == que.t_start_mowing:
+                # start mowing pattern command from hmi
+                if ptype == que.t_start_mowing:
 
-                    # unpack the start vehicle position, mow pattern and the work area
-                    (veh_pos_cm, mowing_pattern, work_area_coord_cm) = data
-                    print ('mowing: veh_pos_cm = ', veh_pos_cm, 'mowing_pattern = ', mowing_pattern)
+                    # unpack the start vehicle position, mow pattern, the work area and beacon positions
+                    (gv.veh_pos_cm, mowing_pattern, work_area_coord_cm, gv.beacon_pos_cm) = data
+                    print (f'{my_name} gv.veh_pos_cm = {gv.veh_pos_cm} mowing_pattern = {mowing_pattern} gv.beacon_pos_cm = {gv.beacon_pos_cm}')
                  
                     
-                    # from the given work area, calculate the coordinates and equations that the mower 
-                    # should adhere to
+                    # from the given work area, calculate the coordinates and equations that the mower should adhere to
                     work_area_limits = calc_work_path(work_area_coord_cm)
-                    
-                    if mowing_pattern == mow_traditional:             
+
+                    # signal to allow the mowing pattern, this global variable is checked by the relevant routines 
+                    stop_mowing = False
+                     
+                    # and start the pattern, pass the response queue to allow dat ato be posted back to the hmi
+                    if mowing_pattern == gv.mow_traditional:             
                         traditional_pattern(work_area_limits, res_q)
                     else:
-                        if mowing_pattern == mow_spiral:
+                        if mowing_pattern == gv.mow_spiral:
                             spiral_pattern(work_area_limits, res_q)
                         else:
-                            if mowing_pattern == mow_random:
+                            if mowing_pattern == gv.mow_random:
                                 random_pattern(work_area_limits, res_q)
-                        
-                            
-                # update of the vehicle position as detected by trangulation
-                if type == que.t_vehicle_position_tri:
+                     
 
-                    # unpack the vehicle position as detected by triangulation
-                    (veh_pos_tri_cm) = data
-                    print ('mowing: veh_pos_tri_cm = ', veh_pos_tri_cm)
-        
-        
-                  
+                                
+                
+                # stop mowing pattern command from hmi, this package type has no data
+                if ptype == que.t_stop_mowing:
+
+                    # signal to stop the mowing pattern immediately, this global variable is monitored by the relevant functions
+                    stop_mowing = True
+                    
+                        
+                # manual command
+                if ptype == que.t_man_mv_forwrd or ptype == que.t_man_mv_cntclk or \
+                   ptype == que.t_man_mv_clk    or ptype == que.t_man_mv_bckwrd:    
+                       
+                    (turn_angle,dist_cm) = data
+                    print (f'{my_name} manual cmd - req turn_angle = {turn_angle} req distance = {dist_cm}')
+                    turn_drive(turn_angle, dist_cm, gnl.manual_mode)                              
+                
+                                        
+                # manual Stop command
+                if ptype == que.t_man_mv_stop:
+                    (turn_angle,dist_cm) = data
+                    print (f'{my_name} Stop cmd')
+            
+            
         # check if this thread needs to exit
-        if kill_thread_1: 
+        if gv.kill_thread_1: 
             
             #  release I2C bus
             bus.close()

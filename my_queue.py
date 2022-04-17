@@ -9,9 +9,15 @@ t_vehicle_start_position = 2
 t_vehicle_position_tri = 3
 t_beacon_position = 4
 t_start_mowing = 5
-t_beacon_status = 6
-t_video_frame = 7
-t_vehicle_position = 8
+t_stop_mowing = 6
+t_beacon_status = 7
+t_video_frame = 8
+t_vehicle_position = 9
+t_man_mv_forwrd = 10
+t_man_mv_cntclk = 11
+t_man_mv_clk = 12
+t_man_mv_bckwrd = 13
+t_man_mv_stop = 14
 
 expire_threshold = 60        # threshold in seconds when queue pkg expire
 

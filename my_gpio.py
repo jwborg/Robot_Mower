@@ -10,7 +10,7 @@ CCW = 0                     # Counterclockwise Rotation
 # mirror rotation stepping motor
 cr_DIR_PIN = 20             # Direction GPIO Pin
 cr_STEP_PIN = 21            # Step GPIO Pin
-cr_SPR = 200 * 2            # Steps per Revolution (half steps)
+cr_SPR = 200 * 2 * 2        # Steps per Revolution (half steps) * gear ratio
 
 # proximity sensor for mirror rotation syncronisation
 mirror_prox_pin = 16
