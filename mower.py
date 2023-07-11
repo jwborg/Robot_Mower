@@ -3,39 +3,60 @@
 from tkinter import *
 from tkinter import ttk
 from tkinter import filedialog
+import tkinter.font # bold
 
 import cv2
 import numpy as np
-
 import math
 import time
-import threading
-import queue
-import tkinter.font # bold
-
 
 # thread imports
-import global_vars as gv
+import threading
+import queue
+
+# application imports
+import global_definitions as gd
 import mowing as mow
 import my_queue as que
 import my_gpio 
-import my_gendef as gnl            # general definitions
-
-my_name = 'mower()'
-
-# only import the RPi.GPIO on Raspberry; Windows 10 has no GPIO 
-try:
-    import RPi.GPIO as GPIO
-    my_gpio.Im_a_Raspberry = True
-    print (f'{my_name} import RPiGPIO ok')
-except:
-    my_gpio.Im_a_Raspberry = False
-    print (f'{my_name} RPiGPIO not found')
+import RPi.GPIO as GPIO
 
 
+# global variables in mower.py namespace
 
+# canvas size in pixels
+cm_pix = 3                                      # scale_factor (cm per pixel)
+p_x_sz = 500                                    # canvas size will be 1500 cm
+p_y_sz = 500
 
+# beacons
+max_no_bcn = 32                                 # maximum number of beacons supported
+sv_beacons = []                                 # screen variables for beacons
+b_set_veh_start_pos = False                     # state of the set vehicle button
+beacon_pos_cm = []                              # (beacon_no,x,y) coordinates of beacons in cm
+h_beacon_pos_cm = [None] * max_no_bcn           # handles to maximum 32 beacon positions on canvas
+    
+# work area
+b_set_work_area = False
+work_area_coord = []                            # (x,y) coordinates of work area in pixels
+work_area_coord_cm = []                         # (x,y) coordinates of work area in cm
+last_work_area_coord = []                       # (x,y) coordinates of last work area in pixels
 
+# starting and stopping of threads
+b_start_mowing = False                          # state of mowings stop/start button
+ 
+# vehicle
+veh_pos = (0,0,-1)                              # vehicle position (x,y, veh_brng) in pixels; (0,0): lower left corner, -1: not know yet
+veh_pos_cm = (0,0,-1)                           # vehicle position (x,y) in cm and vehicle bearing
+veh_color = 'red'
+h_veh_pos = None                                # handle to vehicle object on canvas
+sv_veh_pos = None                               # string variable vehicle position
+
+# grid
+b_grid = False                                  # state of the grid on the canvas
+
+# tracing
+b_trace = False                                 # tracing state
 
 
 
@@ -45,7 +66,7 @@ def create_canvas_area():
     my_name = 'create_canvas_area()'
 
     global h_veh_pos
-    global h_beacon_pos
+    global h_beacon_pos_cm
     
     # create the main frame
     frm_cnvs = ttk.Frame(content, padding=(20, 20, 20, 20 ))
@@ -54,22 +75,22 @@ def create_canvas_area():
     frm_cnvs.grid_rowconfigure(1, weight=1)
 
     # create the canvas to draw
-    cnvs = Canvas(frm_cnvs, bg="red", height=gnl.p_x_sz, width=gnl.p_y_sz)
+    cnvs = Canvas(frm_cnvs, bg="red", height=p_x_sz, width=p_y_sz)
     cnvs.grid()
 
     # mark the intial positions of the objects on the canvas, this is to streamline
     # later updates that first delete and then recreate the object when it moves
     
     # vehicle position and bearing
-    (x,y, veh_brng) = gv.veh_pos
-    gv.h_veh_pos = cnvs.create_text(x, yc(y), text='X', fill = 'black') 
+    (x,y, veh_brng) = veh_pos
+    h_veh_pos = cnvs.create_text(x, yc(y), text='X', fill = 'black') 
     
     # beacon position
-    for bcn in range (len(gv.beacon_pos)):
-        (bcn_no,x,y) = gv.beacon_pos[bcn]
-        gv.h_beacon_pos[bcn] = cnvs.create_text(x, yc(y), text= 'B' + str(bcn_no), fill = 'black')
+    for bcn in range (len(beacon_pos_cm)):
+        (bcn_no,x,y) = beacon_pos_cm[bcn]
+        h_beacon_pos_cm[bcn] = cnvs.create_text(x, yc(y), text= 'B' + str(bcn_no), fill = 'black')
         
-    #print (f'{my_name} gv.h_beacon_pos = {gv.h_beacon_pos}')
+    #print (f'{my_name} h_beacon_pos_cm = {h_beacon_pos_cm}')
     
     # capture the left mouse button when clicked
     cnvs.bind("<Button-1>", cnvs_left_click)   
@@ -106,11 +127,11 @@ def create_status_area():
     # create the beacon coordinates string vars
     t_col = 0
     t_row = 0
-    for var in range(gv.max_no_bcn):
+    for var in range(max_no_bcn):
  
         sv_beacon = StringVar(value = 'B-- ---- , ----')
         lbl_beacon1 = Label(frm_bcn, textvariable=sv_beacon).grid(column=t_col, row=t_row)
-        gv.sv_beacons.append(sv_beacon)
+        sv_beacons.append(sv_beacon)
         t_col += 1
         
         # build a matrix of 3 rows and 8 columns
@@ -125,7 +146,7 @@ def create_status_area():
     chk_grid = ttk.Checkbutton(frm_sts, variable=bv_grid, onvalue=True, offvalue=False, command = toggle_grid)
     chk_grid.grid(column=1, row=4, sticky=(N,W))
     bv_grid.set(False)
-    gv.b_grid = False
+    b_grid = False
     
     # create the tracing label
     Label( frm_sts, text='Tracing').grid(column=0, row=5, sticky=(N,W))
@@ -134,18 +155,22 @@ def create_status_area():
     chk_trace = ttk.Checkbutton(frm_sts, variable=bv_trace, onvalue=True, offvalue=False, command = toggle_trace)
     chk_trace.grid(column=1, row=5, sticky=(N,W))
     bv_trace.set(False)  
-    gv.b_trace = False
+    b_trace = False
     
     # create the Vehicle position label
     Label( frm_sts, text='Veh Pos').grid(column=0, row=6, sticky=(N,W))
 
     # create the vehicle position string variable
-    gv.sv_veh_pos = StringVar(value = '--- , --- / ---')
-    lbl_veh_pos = Label(frm_sts, textvariable=gv.sv_veh_pos).grid(column=1, row=6)
+    sv_veh_pos = StringVar(value = '--- , --- / ---')
+    lbl_veh_pos = Label(frm_sts, textvariable=sv_veh_pos).grid(column=1, row=6)
     
-    # create the button to position the vehicle
-    btn_set_veh_start_pos = ttk.Button(frm_sts, text ="Set Mower Start Position", command = set_veh_start_pos)
-    btn_set_veh_start_pos.grid(column=2, row=6, sticky=(N,W))
+    # create the button to get the vehicle position, will be enabled by loading beacons
+    btn_get_veh_start_pos = ttk.Button(frm_sts, text ="Get Mower Position", state = DISABLED, command = get_veh_start_pos)
+    btn_get_veh_start_pos.grid(column=2, row=6, sticky=(N,W))
+    
+    # create the button to position the vehicle, will be enabled by loading beacons
+    btn_set_veh_start_pos = ttk.Button(frm_sts, text ="Set Mower Start Position", state = DISABLED, command = set_veh_start_pos)
+    btn_set_veh_start_pos.grid(column=3, row=6, sticky=(N,W))
     
     # create the work area label
     Label( frm_sts, text='Work Area').grid(column=0, row=7, sticky=(N,W))
@@ -159,18 +184,18 @@ def create_status_area():
     Label( frm_sts, text='Mowing').grid(column=0, row=9, sticky=(N,W))
     
     # create the radio buttons for mowing patterns
-    gv.mow_pattern =  IntVar()
-    gv.mow_pattern.set(2)
-    Radiobutton(frm_sts ,text="Traditional",variable=gv.mow_pattern,value=1).grid(row = 9,column = 1, sticky=(N,W))
-    Radiobutton(frm_sts ,text="Spiral",variable=gv.mow_pattern,value=2).grid(row = 10,column = 1, sticky=(N,W))
-    Radiobutton(frm_sts ,text="Random",variable=gv.mow_pattern,value=3).grid(row = 11,column = 1, sticky=(N,W))
+    mow_pattern =  IntVar()                         # not sure if mow_pattern = IntVar() should be moved to main()
+    mow_pattern.set(gd.mow_spiral)
+    Radiobutton(frm_sts ,text="Traditional",variable=mow_pattern,value=gd.mow_traditional).grid(row = 9,column = 1, sticky=(N,W))
+    Radiobutton(frm_sts ,text="Spiral",variable=mow_pattern,value=gd.mow_spiral).grid(row = 10,column = 1, sticky=(N,W))
+    Radiobutton(frm_sts ,text="Random",variable=mow_pattern,value=gd.mow_random).grid(row = 11,column = 1, sticky=(N,W))
     
     # create the button to start/stop mowing
     btn_toggle_mow = ttk.Button(frm_sts, text ="Start", command = toggle_mowing_thread)
     btn_toggle_mow.grid(column=2, row=9, sticky=(N,W))
     
     # return all handles that will be used outside of this function
-    return (frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_mow)
+    return (frm_sts, btn_get_veh_start_pos, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_mow)
 
 def create_man_cntrl_area():
 
@@ -247,16 +272,16 @@ def toggle_trace():
 
     global b_trace
     
-    if gv.b_trace:
+    if b_trace:
     
         # delete the tracing
         cnvs.delete("tracing")
-        gv.b_trace = False
+        b_trace = False
     else:
         # any tracing will be done under tag='tracing' by function trace_line
-        gv.b_trace = True
+        b_trace = True
         
-    print (f'{my_name} gv.b_trace = {gv.b_trace}')
+    print (f'{my_name} b_trace = {b_trace}')
     return()
     
     
@@ -265,15 +290,21 @@ def trace_line(last_veh_pos_pix, veh_pos_pix):
 
     my_name = 'trace_line()'
     
-    # convert the y coordinate of both coordinates to match the cartesian coordinate system
+    # the last vehicle position
     (lvpx,lvpy, lvb) = last_veh_pos_pix
-    lvp = (lvpx, yc(lvpy))
     
-    (vpx,vpy, vb) = veh_pos_pix
-    vp = (vpx, yc(vpy))
+    # do not trace the very first line from the origin to the start postion
+    if not(lvpx == 0 and lvpy == 0):
+        
+        # convert the y coordinate of both coordinates to match the cartesian coordinate system
+        lvp = (lvpx, yc(lvpy))
     
-    # and draw the line, tag it to be able to erase it later 
-    cnvs.create_line([lvp, vp], tag='tracing')
+        # the current vehicle position
+        (vpx,vpy, vb) = veh_pos_pix
+        vp = (vpx, yc(vpy))
+        
+        # and draw the line, tag it to be able to erase it later 
+        cnvs.create_line([lvp, vp], tag='tracing')
 
     return()
     
@@ -286,20 +317,20 @@ def toggle_grid():
 
     my_name = 'toggle_grid()'
     
-    grid_size_pix = int(round(150 / gnl.cm_pix, 0))        # grid size 
+    grid_size_pix = int(round(150 / cm_pix, 0))        # grid size 
     
-    if gv.b_grid:
+    if b_grid:
     
-        print (f'{my_name} gv.b_grid = true')
+        print (f'{my_name} b_grid = true')
    
         # delete the grid
         cnvs.delete("grid_lines")
-        gv.b_grid = False
+        b_grid = False
     
     else:
         # draw the grid
         
-        print (f'{my_name} gv.b_grid = false')
+        print (f'{my_name} b_grid = false')
         w = cnvs.winfo_width()          # Get current width of canvas
         h = cnvs.winfo_height()         # Get current height of canvas
         cnvs.delete('grid_lines')       # Will only remove the grid_lines
@@ -312,7 +343,7 @@ def toggle_grid():
         for i in range(0, h, grid_size_pix):
             cnvs.create_line([(0, i), (w, i)], tag='grid_lines')
 
-        gv.b_grid = True
+        b_grid = True
         
     return()
 
@@ -322,6 +353,7 @@ def open_layout():
 
     global work_area_coord_cm
     global work_area_coord
+    global beacon_pos_cm
     
     my_name = 'open_layout()'
     
@@ -346,14 +378,18 @@ def open_layout():
             ii = 1
             bcn = 0
             while ii < len(fields):
-                gv.beacon_pos.append((int(fields[ii]), int(fields[ii + 1]), int(fields[ii + 2])))
+                beacon_pos_cm.append((int(fields[ii]), int(fields[ii + 1]), int(fields[ii + 2])))
                 ii = ii + 3  
                 bcn += 1
                 
-            canvas_beacon_update(gv.beacon_pos)
+            canvas_beacon_update(beacon_pos_cm)
             
             # log the beacon locations were restored
             h_log.insert('end', 'Restored Beacon locations from lay-out file')
+            
+            # enable the 'get_vehicle_position' and 'set_vehicle_position' button (Disabled at startup)
+            btn_get_veh_start_pos["state"] = "normal"
+            btn_set_veh_start_pos["state"] = "normal"
  
         # work area: W, corner_1_x,corner_1_y, corner_2_x,corner_2_y, ..., corner_n_x,corner_n_y
         if fields[0] == 'W':
@@ -364,24 +400,24 @@ def open_layout():
             # list of (x,y) coordinates of each the work area in cm
             ii = 1
             while ii < len(fields):
-                gv.work_area_coord_cm.append((int(fields[ii]), int(fields[ii + 1])))
+                work_area_coord_cm.append((int(fields[ii]), int(fields[ii + 1])))
                 ii = ii + 2       
-            print (f'{my_name} gv.work_area_coord_cm = {gv.work_area_coord_cm}')
+            print (f'{my_name} work_area_coord_cm = {work_area_coord_cm}')
             
             # now convert the work area from cm to pixel and store with lower left origin
-            gv.work_area_coord = []
-            for coord in gv.work_area_coord_cm:
+            work_area_coord = []
+            for coord in work_area_coord_cm:
                 print (f'{my_name} coord = {coord}')
                 (x,y) = coord
                 
                 # change origin to (0,0) and convert to cm
-                x_pix = x / gnl.cm_pix
-                y_pix = yc(y / gnl.cm_pix)
+                x_pix = x / cm_pix
+                y_pix = yc(y / cm_pix)
                 coord_pix = (x_pix, y_pix)
-                gv.work_area_coord.append(coord_pix)
+                work_area_coord.append(coord_pix)
             
             # draw the polynom representing the work area
-            cnvs.create_polygon(gv.work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
+            cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
             
             # log the work area was restored
             h_log.insert('end', 'Restored Work Area from lay-out file')
@@ -441,51 +477,66 @@ def cnvs_left_click(event):
     # based upon the boolean that was set when the function was requested
     
     
-    if gv.b_set_veh_start_pos:
+    if b_set_veh_start_pos:
     
-        print (f'{my_name} gv.b_set_veh_start_pos clicked at {event.x} {event.y}')
+        print (f'{my_name} b_set_veh_start_pos clicked at {event.x} {event.y}')
         
         # clear the X at the last location
-        (x_last, y_last, veh_brng) = gv.veh_pos
+        (x_last, y_last, veh_brng) = veh_pos
         
         # clear the last location of the vehicle
-        cnvs.delete(gv.h_veh_pos)
+        cnvs.delete(h_veh_pos)
         
         # write a X at the mouse click location; mouse entered coordinates 
-        gv.h_veh_pos = cnvs.create_text(event.x, event.y, text='X', fill = 'black')
+        h_veh_pos = cnvs.create_text(event.x, event.y, text='X', fill = 'black')
         
-        # gv.veh_pos is in pixels
+        # veh_pos is in pixels
         x_veh = event.x
         y_veh = yc(event.y)
-        gv.veh_pos = (x_veh, y_veh, veh_brng)
+        veh_pos = (x_veh, y_veh, veh_brng)
 
         # convert vehicle position to cm
-        x_veh_cm = x_veh * gnl.cm_pix
-        y_veh_cm = y_veh * gnl.cm_pix
+        x_veh_cm = x_veh * cm_pix
+        y_veh_cm = y_veh * cm_pix
         
         # update the numerical vehicle position indication in cm
-        gv.sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm) + ' / ' + str(veh_brng))
+        sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm) + ' / ' + str(veh_brng))
         
         
         
         
-    elif gv.b_set_work_area:
+    elif b_set_work_area:
         
         # add each (x,y) coordinate to the work area list. When the Finish Work Area button is pressed
         # draw the polynom showing the work area
-        print (f'{my_name} gv.b_set_work_area clicked at {event.x} {event.y}')
+        print (f'{my_name} b_set_work_area clicked at {event.x} {event.y}')
         
         # write a W at the mouse click location to assist in marking out the work area; mouse entered coordinates - no conversion required
         cnvs.create_text(event.x, event.y, text='W', fill = 'black', tag="tag_work_area_markers")
         
         # append to the list
-        gv.work_area_coord.append((event.x, event.y))
+        work_area_coord.append((event.x, event.y))
         
     else:    
         print (f'{my_name} left mouse button clicked')
+
+
+# button 'get vehicle position' is pushed
+# this will allow the mower to determine it's own position via trilaterationn
+# and the user does not need to enter the start position via the hmi
+def get_veh_start_pos():
+    
+    my_name = 'get_veh_start_pos()'
+    print (f'{my_name} get_vehicle_position clicked')        
+
+    # send a 'get vehicle position' message to the mowing thread
+    # this will start a triangulation
+    data = (beacon_pos_cm)  
+    que.push_queue(cmd_q_thread1, que.t_get_position, data)
         
 
 # button 'Set / Finish vehicle start position' is pushed
+# if trilateration does not work, the mower position can be set manually
 def set_veh_start_pos():
 
     global b_set_veh_start_pos
@@ -493,24 +544,20 @@ def set_veh_start_pos():
     my_name = 'set_veh_start_pos()'
     
     # toggle the flag as the event will be handle by left_mouse()
-    gv.b_set_veh_start_pos = not gv.b_set_veh_start_pos
+    b_set_veh_start_pos = not b_set_veh_start_pos
     
     # change the button text
-    if gv.b_set_veh_start_pos:
+    if b_set_veh_start_pos:
         btn_set_veh_start_pos.config(text = 'Finish start positon')
         h_log.insert('end','Set mower start position')
       
     else:
     
         # convert vehicle position to cm, the vehicle bearing is yet unknown 
-        (x, y, veh_brng) = gv.veh_pos
-        x_veh_cm = x * gnl.cm_pix
-        y_veh_cm = y * gnl.cm_pix
-        gv.veh_pos_cm = (x_veh_cm,y_veh_cm, veh_brng)
-        
-        # send a 'vehicle start position' message to the positioning thread
-        #data = (gv.veh_pos_cm, gnl.cm_pix)                        # package is x ccordinate, y coordinate and the scale factor
-        #que.push_queue(cmd_q_thread0, que.t_vehicle_start_position, data)
+        (x, y, veh_brng) = veh_pos
+        x_veh_cm = x * cm_pix
+        y_veh_cm = y * cm_pix
+        veh_pos_cm = (x_veh_cm,y_veh_cm, veh_brng)
             
         # log
         h_log.insert('end','Mower ' + ' set at position (' + str(x_veh_cm) + ',' +  str(y_veh_cm) + ') cm - bearing ' + str(veh_brng))
@@ -533,20 +580,20 @@ def set_work_area():
     my_name = 'set_work_area()'
     
     # toggle the flag as entering the coordinates will be handle by left_mouse()
-    gv.b_set_work_area = not gv.b_set_work_area
+    b_set_work_area = not b_set_work_area
     
     # change the button text
-    if gv.b_set_work_area:
+    if b_set_work_area:
         
         # first clear the previous work area
-        gv.last_work_area_coord = gv.work_area_coord
+        last_work_area_coord = work_area_coord
         
         # start fresh
-        gv.work_area_coord = []
+        work_area_coord = []
     
         # clear the work area if it exists by tag
-        if not (gv.last_work_area_coord == []):
-            print (f'{my_name} gv.last_work_area_coord = {gv.last_work_area_coord}')
+        if not (last_work_area_coord == []):
+            print (f'{my_name} last_work_area_coord = {last_work_area_coord}')
             cnvs.delete("tag_work_area")
             
         # change the function of the button
@@ -563,18 +610,18 @@ def set_work_area():
         cnvs.delete("tag_work_area_markers")    
 
         # draw the polynom representing the work area; mouse entered coordinates - no conversion required
-        cnvs.create_polygon(gv.work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
+        cnvs.create_polygon(work_area_coord, outline='green', fill='green', width=3, tag='tag_work_area')
   
         # now convert the work area to cm and store with lower left origin
-        gv.work_area_coord_cm = []
-        for coord in gv.work_area_coord:
+        work_area_coord_cm = []
+        for coord in work_area_coord:
             (x,y) = coord
             
             # change origin to (0,0) and convert to cm
-            x_cm = x * gnl.cm_pix
-            y_cm = yc(y) * gnl.cm_pix
+            x_cm = x * cm_pix
+            y_cm = yc(y) * cm_pix
             coord_cm = (x_cm, y_cm)
-            gv.work_area_coord_cm.append(coord_cm)
+            work_area_coord_cm.append(coord_cm)
         
         # change the function of the button
         btn_set_work_area.config(text = 'Set Work Area ')
@@ -600,24 +647,24 @@ def toggle_mowing_thread():
     my_name = 'toggle_mowing()'
     
     # toggle the flag as the event will be handle by left_mouse()
-    gv.b_start_mowing = not gv.b_start_mowing
+    b_start_mowing = not b_start_mowing
     
     # change the button text
-    if gv.b_start_mowing:
+    if b_start_mowing:
         btn_toggle_mow.config(text = 'Stop')
         h_log.insert('end','Starting mowing')
         
         # get the mowing pattern
-        mowing_pattern = gv.mow_pattern.get()
+        mowing_pattern = mow_pattern.get()
         
         # the current position is the starting position 
-        (x,y, veh_brng) = gv.veh_pos
-        x_veh_cm = x * gnl.cm_pix         
-        y_veh_cm = y * gnl.cm_pix
-        gv.veh_pos_cm = (x_veh_cm, y_veh_cm, veh_brng)
+        (x,y, veh_brng) = veh_pos
+        x_veh_cm = x * cm_pix         
+        y_veh_cm = y * cm_pix
+        veh_pos_cm = (x_veh_cm, y_veh_cm, veh_brng)
         
         # sent the mowing information: start position, mower pattern, work area and beacon position
-        data = (gv.veh_pos_cm, mowing_pattern, gv.work_area_coord_cm, gv.beacon_pos)                    
+        data = (veh_pos_cm, mowing_pattern, work_area_coord_cm, beacon_pos_cm)                
         que.push_queue(cmd_q_thread1, que.t_start_mowing, data)
         
     
@@ -633,28 +680,30 @@ def toggle_mowing_thread():
 
                 
 # write position of the beacons on the canvas 
-def canvas_beacon_update(beacon_pos):
+def canvas_beacon_update(beacon_pos_cm):
 
-    for bcn in range(len(beacon_pos)):
+    global h_beacon_pos_cm
+    
+    for bcn in range(len(beacon_pos_cm)):
     
         # unpack the beacon position x,y received in cm
-        (bcn_no, x_cm, y_cm) = beacon_pos[bcn]
+        (bcn_no, x_cm, y_cm) = beacon_pos_cm[bcn]
         
         # save space, present as integers
         x_cm = int(x_cm)
         y_cm = int(y_cm)
         
         # update the numerical indication
-        sv_beacon = gv.sv_beacons[bcn]
+        sv_beacon = sv_beacons[bcn]
         sv_beacon.set(str(bcn_no) + ' ' + str(x_cm) + ',' + str(y_cm) + ' ')
 
         # delete the previous beacon from the canvas
-        cnvs.delete(gv.h_beacon_pos[bcn])
+        cnvs.delete(h_beacon_pos_cm[bcn])
         
         # write a B at the mouse click location
-        x_pix = int(x_cm / gnl.cm_pix)
-        y_pix = int(y_cm / gnl.cm_pix)
-        gv.h_beacon_pos[bcn] = cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn_no), fill = 'black') 
+        x_pix = int(x_cm / cm_pix)
+        y_pix = int(y_cm / cm_pix)
+        h_beacon_pos_cm[bcn] = cnvs.create_text(x_pix, yc(y_pix), text='B' + str(bcn_no), fill = 'black') 
         
     return()
 
@@ -732,7 +781,7 @@ def hmi_update():
         global veh_color
         global veh_pos
         global h_veh_pos
-        global h_beacon_pos
+        global sv_veh_pos
         
         my_name = 'hmi_update()'
         
@@ -740,8 +789,8 @@ def hmi_update():
         que.expire_threshold = 60        # threshold in seconds when queue pkg expire
         
         # the vehicle location in pixels
-        last_veh_pos = gv.veh_pos
-        (x_veh, y_veh, veh_brng) = gv.veh_pos
+        last_veh_pos = veh_pos
+        (x_veh, y_veh, veh_brng) = veh_pos
         
         # service the mowing queue thread 1
         pkgs = que.get_queue(res_q_thread1)
@@ -768,26 +817,26 @@ def hmi_update():
                     veh_brng = int(data[2])
 
                     # update the numerical vehicle position on the screen
-                    gv.sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm) + ' / ' + str(veh_brng))
+                    sv_veh_pos.set(str(x_veh_cm) + ' , ' + str(y_veh_cm) + ' / ' + str(veh_brng))
                     
                     # convert to pixel
-                    x_veh = data[0] / gnl.cm_pix         
-                    y_veh = data[1] / gnl.cm_pix
-                    gv.veh_pos = (x_veh, y_veh, veh_brng)
+                    x_veh = data[0] / cm_pix         
+                    y_veh = data[1] / cm_pix
+                    veh_pos = (x_veh, y_veh, veh_brng)
 
                     # if tracing is switched on, draw the path
-                    if gv.b_trace:
-                        trace_line(last_veh_pos, gv.veh_pos)
+                    if b_trace:
+                        trace_line(last_veh_pos, veh_pos)
                         
                     print (f'{my_name} x_veh_cm = {x_veh_cm} new y_veh_cm = {y_veh_cm} veh_brng = {veh_brng}')
   
 
         # now update the canvas which updated every cycle in order to make a blinking vehicle position
-        cnvs.delete(gv.h_veh_pos)
+        cnvs.delete(h_veh_pos)
             
         # write a X at the vehicle location and blink it
-        gv.veh_color = 'red' if gv.veh_color == 'black' else 'black'
-        gv.h_veh_pos = cnvs.create_text(x_veh, yc(y_veh), text='X', fill = gv.veh_color) 
+        veh_color = 'red' if veh_color == 'black' else 'black'
+        h_veh_pos = cnvs.create_text(x_veh, yc(y_veh), text='X', fill = veh_color) 
         
         # generate a software event to call this function again after 1 second
         cnvs.after(1000, hmi_update)
@@ -802,7 +851,7 @@ def yc(y):
     # (0,p_y_sz/2)  -> (0,p_y_sz/2)
     # (0,p_y_sz)    -> (0,0)
     
-    y = -y + gnl.p_y_sz    
+    y = -y + p_y_sz    
     return (y)   
 
 
@@ -813,16 +862,15 @@ def close_app():
     my_name = 'close_app()'
     
     # stop the mowing thread
-    gv.kill_thread_1 = True
+    gd.kill_thread_1 = True
 
     # wait until the thread has stopped
     while True:
-        if not gv.t1.is_alive():
+        if not gd.t1.is_alive():
             break
             
-    # On a Raspberry, release the GPIO
-    if my_gpio.Im_a_Raspberry:
-        GPIO.cleanup()
+    # release the GPIO; re-initialize to clear all outputs
+    setup_GPIO()
 
     # and exit
     root.destroy()
@@ -839,16 +887,19 @@ def setup_GPIO():
     GPIO.setmode(GPIO.BCM)
  
     # mirror rotation
-    GPIO.setup(my_gpio.cr_DIR_PIN, GPIO.OUT)
-    GPIO.setup(my_gpio.cr_STEP_PIN, GPIO.OUT)
-    GPIO.output(my_gpio.cr_DIR_PIN, my_gpio.CW)     # start clock wise
+    GPIO.setup(my_gpio.MIR_DIR_PIN, GPIO.OUT)
+    GPIO.setup(my_gpio.MIR_STEP_PIN, GPIO.OUT)
+    GPIO.output(my_gpio.MIR_DIR_PIN, my_gpio.CW)     # start clock wise
 
     # mirror rotation calibration proximity sensor
-    GPIO.setup(my_gpio.mirror_prox_pin, GPIO.IN)     
+    GPIO.setup(my_gpio.MIR_ZERO_PIN, GPIO.IN)     
     
     # drive motor status feedback
-    GPIO.setup(my_gpio.cr_DRV_PIN, GPIO.IN)   
+    GPIO.setup(my_gpio.WHL_DRV_PIN, GPIO.IN)   
     
+    # blade motor control (on or off)
+    GPIO.setup(my_gpio.BLD_MOT_PIN, GPIO.OUT)   
+
     print(f'{my_name} GPIO setup completed')
  
 
@@ -862,10 +913,11 @@ def setup_GPIO():
 if __name__ == '__main__':
     
     my_name = 'main():'
-
-    # On a Raspberry only, set up the GPIO 
-    if my_gpio.Im_a_Raspberry:
-        setup_GPIO()
+    
+    version = 1.0
+    
+    # set up the GPIO 
+    setup_GPIO()
 
     root = Tk()
 
@@ -880,7 +932,7 @@ if __name__ == '__main__':
     root.resizable(0,0)                         # don't allow resizing
 
     # display the essentials in the top line
-    root.wm_title(my_name  +  " version " + str(gv.version))
+    root.wm_title(my_name  +  " version " + str(version))
 
     # set up the File menu 
     menubar = Menu(root)
@@ -903,7 +955,7 @@ if __name__ == '__main__':
     # Create and grid the status frame
     bv_grid = BooleanVar() 
     bv_trace = BooleanVar() 
-    (frm_sts, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_mow) = create_status_area()
+    (frm_sts, btn_get_veh_start_pos, btn_set_veh_start_pos, btn_set_work_area, btn_toggle_mow) = create_status_area()
 
     # create and grid the manual controls area
     (frm_man_ctl) = create_man_cntrl_area()
@@ -919,9 +971,9 @@ if __name__ == '__main__':
     res_q_thread1 = queue.Queue()                       # results from the mowing thread
 
     # start the mowing thread
-    gv.kill_thread_1 = False
-    gv.t1 = threading.Thread(target=mow.mowing, args=(cmd_q_thread1, res_q_thread1))
-    gv.t1.start() 
+    gd.kill_thread_1 = False
+    gd.t1 = threading.Thread(target=mow.mowing, args=(cmd_q_thread1, res_q_thread1))
+    gd.t1.start() 
             
     # start the scheduled hmi update (vehicle position etc)
     hmi_update()

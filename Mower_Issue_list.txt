@@ -1,0 +1,39 @@
+Mower issue list
+
+1, PCB v1.0 - Mtr A PWM is connected to D4, which is nor PWM capable. Currently the following 
+   is done to avoid PCN board changes:
+
+	a. Mtr A DIR (D5) cable is now connected to D4
+	b. Mtr A PWM (D4) cable is now connected to D5 (PWM capable).
+	c. motor_0_1_slave_i2c_pid_softstart has been configured to use Mtr A PWM on D5 and Mtr B PWM on D6
+
+	PCB board update.
+
+2. ESD flipflop state should have a indicator LED when operated.
+
+	PCB board update
+
+3. ESD should be normally on, currently normally off.
+
+4. Arduino Nano USB port cannot be connected due to position of the Motor connectors. Otherwise require D2 and D3 pins for RX and TX.
+
+5. I2C pull-up resistors nor required on 3.3 and 5V side, due to logic converter.
+
+6. Require Ground pin for testing.
+
+7. Need I2C for compass on 5V
+
+8. Use a 8 port AND more ready available
+
+9. Need more testing pins (5V, 3V, GND, I2C Data, clock)
+
+10. Mowing motor pins, signal is 3.3 V, but power to board is 5V. Either convert to 5V. Integrate relays on board?
+
+11. Need a ESD that stops (brakes) the mowing motor and stops driving but does not power down the Raspberry and Arduino. 
+
+12. The mowing motor requires an additional relay to brake the motor.
+
+13. Set up test pins from I2C, ground, 5V etc.
+
+14. Need additional interrupts for manual control (Xbox controller) and ESD.
+

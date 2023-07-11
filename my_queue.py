@@ -18,6 +18,7 @@ t_man_mv_cntclk = 11
 t_man_mv_clk = 12
 t_man_mv_bckwrd = 13
 t_man_mv_stop = 14
+t_get_position = 15
 
 expire_threshold = 60        # threshold in seconds when queue pkg expire
 
