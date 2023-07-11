@@ -17,17 +17,41 @@
 // $bad                                             Invalid command
 //
 // Hardware lines
-// FBK Output pin will be high for 0.5s after completion of the Drive command
-// ESD input pin is polled, if LOW both motors will stop instantanously.
+// READY Output pin will be high after completion of the Drive command
+// ESD input pin is polled, if HIGH both motors will stop instantanously.
 //
 // This module can be tested using the serial monitor, however the serial.println affect the timing, and 
 // should never be used in interrupt service routines. 
-
+//
+// 18/8/2022 - Rev 1.1
+//             MTR A and B PWN Pin assignments changed to work with PCB board rev 1.0
+//             PCB rev 1.0 has MTR A DIR connected to D6 and MTR A PWM to D4, but D4 is not PWM capable
+//             The MTR A cable DIR and PWM were reversed to avoid changes on PCB board rev 1.0: 
+//             MTR A Cable reversed DIR and PM pins: 
+//                MTR A DIR D6 -> D4
+//                MTR A PWM D4 -> D6
+//             Software changes:  
+//                int motor0_pwm_pin = D5 -> D6;
+//                int motor1_pwm_pin = D6 -> D5;
+//  18/8/2022 - Rev 1.1 
+//            ESD active state changed to HIGH
+//  29/9/2022 - Rev 1.2
+//            Changed READY pin to D10 to match PCN
+//            Used built-in LED on D13 to indicate ESD status. ESD actived = LED on.
+//
+//   1/1/2023 Rev 1.3 
+//            Increased the soft start minimum duty from 30% to 70%. In grass the resistance is too great
+//            to start driving, hence when zero turning the desired angle doe not get reached, especially for 
+//            small turns.
+//
 #include <math.h>
 #include <string.h>
 #include <Wire.h>
 #include "PID.h"        // read from project directory
 #include "PID.c"
+
+// revision
+#define REVISION "v1.3 (PWM signal fix for PCB rev 1.0)"
 
 // PID Controller parameters
 #define PID_KP  2.0f
@@ -57,7 +81,8 @@ PIDController pid = { PID_KP, PID_KI, -PID_KD,
 float duty_0;                   // duty 0-100%
 int pwm_signal_0;               // pwm signal 0-4095
 volatile int motor_count_0;     // motor0 rotation count
-int motor0_pwm_pin = 5;         // pwm pin capable of 960Hz
+//int motor0_pwm_pin = 5;         // pwm pin capable of 960Hz
+int motor0_pwm_pin = 6;         // pwm pin capable of 960Hz
 int motor0_dir_pin = 4;         // direction of motor0 pin
 int motor0_int_pin = 2;         // rotation counter pin
 int motor0_dir;                 // direction of motor0
@@ -66,7 +91,8 @@ int motor0_dir;                 // direction of motor0
 float duty_1;                   // duty 0-100%
 int pwm_signal_1;               // pwm signal 0-4095
 volatile int motor_count_1;     // motor0 rotation count
-int motor1_pwm_pin = 6;         // pwm pin capable of 960Hz
+// int motor1_pwm_pin = 6;         // pwm pin capable of 960Hz
+int motor1_pwm_pin = 5;         // pwm pin capable of 960Hz
 int motor1_dir_pin = 7;         // direction of motor1 pin
 int motor1_int_pin = 3;         // rotation counter pin
 int motor1_dir;                 // direction of motor1
@@ -75,15 +101,16 @@ int motor1_dir;                 // direction of motor1
 unsigned long now_time;
 unsigned long intr_time_0, intr_time_1;
 unsigned long last_intr_time_0, last_intr_time_1;
-unsigned long debounce_time = 20;  // debounce time in ms
+unsigned long debounce_time = 5;  // debounce time in ms (blue-red 8ms between pulses, red-green 20)
 
 
 
 // emergency shutdown
 int esd_pin = 8;                // by polling pin
+int esd_led = 13;               // When LED is on, ESD was triggered
 
 // ready 
-int ready_pin = 13;             // to tell the PI, I'm ready (built-in LED)
+int ready_pin = 10;             // to tell the PI, I'm ready 
 
 
 // registers layout
@@ -216,7 +243,7 @@ int move(int no_steps, float steer_sp, int turn_on_spot, float req_duty_sp) {
   float delta_count; 
   float duty_adj;
   float max_duty = 100.0;
-  float min_duty = 30.0;
+  float min_duty = 50.0;                  // at 30% does not overcome resistance to start in grass
   float ramp_rate = 0.4;                  // adjust accordingly, serial println have large impact
   int ramp_steps = 0;                     // the number of steps used for ramping up 
   int ramping_up = 1;                     // initially ramping_up = True
@@ -271,9 +298,13 @@ int move(int no_steps, float steer_sp, int turn_on_spot, float req_duty_sp) {
     
     // check if Emergency Shutdown switch was activated, break from while loop
     esd_state = digitalRead(esd_pin);
-    if (esd_state == LOW) {
-      Serial.println((String) "Emergency Shutdown operated");
+    if (esd_state == HIGH) {
+
       status = ESD;
+      Serial.println((String) "Emergency Shutdown operated");
+      
+      // and switch the ESD LED on
+      digitalWrite(esd_led, esd_state);    
       break;
     }
 
@@ -349,7 +380,7 @@ int move(int no_steps, float steer_sp, int turn_on_spot, float req_duty_sp) {
     analogWrite(motor1_pwm_pin, pwm_signal_1);
   
     // debug message
-    //Serial.println((String) "Duty = " + duty_0 + " m0 = " + motor_count_0 + " " + duty_1 + " m1 = " + motor_count_1);
+    Serial.println((String) "Duty = " + duty_0 + " m0 = " + motor_count_0 + " " + duty_1 + " m1 = " + motor_count_1);
   
     // next cycle in <dt> second
     delay((int) (SAMPLE_TIME_S * 1000.0));
@@ -363,7 +394,7 @@ int move(int no_steps, float steer_sp, int turn_on_spot, float req_duty_sp) {
   // report the final count
   ur.rgstr.m0_count = motor_count_0;
   ur.rgstr.m1_count = motor_count_1;
-  //Serial.println((String) "m0 = " + motor_count_0 + " m1 = " + motor_count_1);
+  Serial.println((String) "m0 = " + motor_count_0 + " m1 = " + motor_count_1);
   Serial.println((String) "$ok");
   
   // signal the Arduino is ready again
@@ -374,10 +405,10 @@ int move(int no_steps, float steer_sp, int turn_on_spot, float req_duty_sp) {
 
 
 void setup() {
-
+    
   // setup the serial console for debugging messages
   Serial.begin(9600);
-  Serial.println("Double motor - I2C Slave");
+  Serial.println((String) "Double motor - I2C Slave - Ramp " + REVISION);
 
   // setup I2C communication with RPI Master
   Wire.begin(SLAVE_ADDRESS);
@@ -408,7 +439,10 @@ void setup() {
   // setup pin for Emergency shutdown for polling (Uno has only 2 interrupts)
   pinMode(esd_pin, INPUT_PULLUP);
 
-   // setup pin for ready signal, this will tell the Pi the Arduino is ready
+  // setup pin for LED to show ESD state, this will tell if the ESD was activated
+  pinMode(esd_led, OUTPUT);
+
+  // setup pin for ready signal, this will tell the Pi the Arduino is ready
   pinMode(ready_pin, OUTPUT);
   digitalWrite(ready_pin, HIGH);    // Arduino is ready
 
@@ -422,8 +456,12 @@ void loop() {
     int no_steps; 
     float duty_sp;
     float steer_sp;
-     
-                                                                 
+    int esd_state; 
+
+    // show the correct ESD state
+    esd_state = digitalRead(esd_pin);
+    digitalWrite(esd_led, esd_state);    
+
     // only commands that write to the slave need coding. All commands that read from the slave,
     // read directly from the registers, which are updated by the motor driver.
                                                                    
